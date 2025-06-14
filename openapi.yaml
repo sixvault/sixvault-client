@@ -1,0 +1,769 @@
+openapi: 3.0.0
+info:
+  title: Sixvault Core API
+  description: Sixvault is a secure, role-based academic transcript management system that integrates multi-cryptographic techniques—including AES encryption, RSA digital signatures, and Shamir's Secret Sharing—to protect the confidentiality, integrity, and authenticity of student data in a controlled, collaborative environment.
+  version: 1.0.0
+servers:
+  - url: https://api.sixvault.xyz
+    description: Production Server
+  - url: http://localhost:3000
+    description: Local Development Server
+paths:
+  /user/auth/register:
+    post:
+      summary: Register a new user
+      description: Register a new user with their RSA public key and role information
+      tags:
+        - User
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim_nip
+                - type
+                - prodi
+                - rsaPublicKey
+                - nama
+              properties:
+                nim_nip:
+                  type: string
+                  description: NIM/NIP of the user
+                type:
+                  type: string
+                  enum: [mahasiswa, dosen_wali, kaprodi]
+                  description: Type of user
+                prodi:
+                  type: string
+                  enum: [teknik_informatika, sistem_dan_teknologi_informasi]
+                  description: Program studi of the user
+                rsaPublicKey:
+                  type: string
+                  description: RSA public key of the user
+                nama:
+                  type: string
+                  description: Full name of the user
+      responses:
+        '200':
+          description: Registration successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Registration successful
+                  data:
+                    type: object
+                    properties:
+                      nim_nip:
+                        type: string
+                      access_token:
+                        type: string
+                      refresh_token:
+                        type: string
+                      encrypted_token_key:
+                        type: string
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /user/auth/login:
+    post:
+      summary: Login user
+      description: Authenticate user and return encrypted tokens
+      tags:
+        - User
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim_nip
+                - rsaPublicKey
+              properties:
+                nim_nip:
+                  type: string
+                  description: NIM/NIP of the user
+                rsaPublicKey:
+                  type: string
+                  description: RSA public key of the user
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Login successful
+                  data:
+                    type: object
+                    properties:
+                      nim_nip:
+                        type: string
+                      type:
+                        type: string
+                        enum: [mahasiswa, dosen_wali, kaprodi]
+                      prodi:
+                        type: string
+                        enum: [teknik_informatika, sistem_dan_teknologi_informasi]
+                      access_token:
+                        type: string
+                      refresh_token:
+                        type: string
+                      encrypted_token_key:
+                        type: string
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /user/auth/refresh-token:
+    get:
+      summary: Refresh access token
+      description: Get a new access token using the refresh token
+      tags:
+        - User
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Token refresh successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Token Refresh Success
+                  data:
+                    type: object
+                    properties:
+                      nim_nip:
+                        type: string
+                      type:
+                        type: string
+                        enum: [mahasiswa, dosen_wali, kaprodi]
+                      prodi:
+                        type: string
+                        enum: [teknik_informatika, sistem_dan_teknologi_informasi]
+                      access_token:
+                        type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /user/auth/verify:
+    get:
+      summary: Verify access token
+      description: Verify the user's access token and return a new access token
+      tags:
+        - User
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Token verification successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Verify auth Success
+                  data:
+                    type: object
+                    properties:
+                      nim_nip:
+                        type: string
+                      type:
+                        type: string
+                        enum: [mahasiswa, dosen_wali, kaprodi]
+                      prodi:
+                        type: string
+                        enum: [teknik_informatika, sistem_dan_teknologi_informasi]
+                      access_token:
+                        type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /user/remove:
+    post:
+      summary: Remove multiple Mahasiswa entries
+      description: Delete student records by a list of `nim_nip`.
+      tags:
+        - User
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim_nip
+              properties:
+                nim_nip:
+                  type: array
+                  items:
+                    type: string
+                  example: ["1202210012", "1202210013"]
+      responses:
+        '200':
+          description: Mahasiswa entries deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: 2 mahasiswa deleted
+        '400':
+          description: Bad request due to missing or invalid nim_nip
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: nim_nip must be a non-empty array
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /protected:
+    get:
+      summary: Protected route
+      description: Example of a protected route that requires authentication
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successfully accessed protected route
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Protected route
+                  data:
+                    type: object
+                    properties:
+                      nim_nip:
+                        type: string
+                      type:
+                        type: string
+                      prodi:
+                        type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nilai/add:
+    post:
+      summary: Add and encrypt daftar nilai
+      description: Adds a batch of nilai entries for students, encrypts them using AES, splits the AES key using Shamir's Secret Sharing, and stores the shares across available dosen.
+      tags:
+        - Nilai
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required:
+                  - nim
+                  - kode
+                  - nama
+                  - nilai
+                  - nip
+                properties:
+                  nim:
+                    type: string
+                    example: "10222069"
+                    description: NIM of the student
+                  kode:
+                    type: string
+                    example: "MK123"
+                    description: Course code
+                  nama:
+                    type: string
+                    example: "Dasar Pemrograman"
+                    description: Course name
+                  nilai:
+                    type: string
+                    enum: [A, AB, B, BC, C, D]
+                    example: A
+                    description: Grade of the student (NilaiType enum)
+                  nip:
+                    type: string
+                    example: "197812312019031002"
+                    description: NIP of the student's dosen wali
+      responses:
+        '200':
+          description: All valid nilai entries inserted and encrypted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: All valid nilai entries inserted and encrypted
+                  data:
+                    type: object
+                    properties:
+                      count:
+                        type: integer
+                        example: 5
+        '400':
+          description: Bad request or validation failure
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Request body must be a non-empty array of nilai entries
+                  data:
+                    type: object
+                    example: {}
+  /student/search:
+    post:
+      summary: Search for a student
+      description: Search and retrieve a student's name using their NIM/NIP. Only users with type "mahasiswa" are valid.
+      tags:
+        - Student
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim_nip
+              properties:
+                nim_nip:
+                  type: string
+                  description: NIM of the student
+      responses:
+        '200':
+          description: Student found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Student Found!
+                  data:
+                    type: object
+                    properties:
+                      nama:
+                        type: string
+                        example: Budi Santoso
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /matakuliah/add:
+    post:
+      summary: Add multiple Mata Kuliah entries
+      description: Add one or more Mata Kuliah entries to the database. Duplicates will be skipped. Each item must include `kode`, `nama`, and `sks`.
+      tags:
+        - MataKuliah
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required:
+                  - kode
+                  - nama
+                  - sks
+                properties:
+                  kode:
+                    type: string
+                    example: IF3020
+                  matakuliah:
+                    type: string
+                    example: Pemrograman Web
+                  sks:
+                    type: integer
+                    example: 3
+      responses:
+        '200':
+          description: Mata Kuliah entries added successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Added matakuliah success
+        '400':
+          description: Bad request due to missing or invalid fields
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Each matakuliah must have 'kode', 'nama', and 'sks'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /matakuliah/list:
+    get:
+      summary: List all Mata Kuliah entries
+      description: Retrieve all Mata Kuliah entries from the database
+      tags:
+        - MataKuliah
+      responses:
+        '200':
+          description: Mata Kuliah entries retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: List matakuliah success
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kode:
+                          type: string
+                          example: IF3020
+                        matakuliah:
+                          type: string
+                          example: Pemrograman Web
+                        sks:
+                          type: integer
+                          example: 3
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+  /nilai/decrypt:
+    post:
+      summary: Decrypt daftar nilai
+      description: Decrypts encrypted student data (nim, kode, nama, nilai) by reconstructing the AES key using Shamir's Secret Sharing.
+      tags:
+        - Nilai
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - daftarNilaiId
+              properties:
+                daftarNilaiId:
+                  type: int
+                  example: 6
+      responses:
+        '200':
+          description: Successfully decrypted the data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Data decrypted successfully
+                  data:
+                    type: object
+                    properties:
+                      nim:
+                        type: string
+                        example: "10222069"
+                      kode:
+                        type: string
+                        example: "MK123"
+                      nama:
+                        type: string
+                        example: "Dasar Pemrograman"
+                      nilai:
+                        type: string
+                        example: "A"
+        '400':
+          description: Bad request (missing ID or not enough shares)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Missing daftarNilaiId in request body
+                  data:
+                    type: object
+                    example: {}
+        '404':
+          description: Daftar nilai not found
+        '500':
+          description: Internal server error
+
+  /matakuliah/remove:
+    post:
+      summary: Remove multiple Mata Kuliah entries
+      description: Delete Mata Kuliah records by a list of `kode` values.
+      tags:
+        - MataKuliah
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - kodeList
+              properties:
+                kodeList:
+                  type: array
+                  items:
+                    type: string
+                  example: ["IF3020", "IF1234"]
+      responses:
+        '200':
+          description: Mata Kuliah entries deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: 2 matakuliah deleted
+        '400':
+          description: Bad request due to missing or invalid kodeList
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: kodeList must be a non-empty array
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nilai/view:
+    get:
+      summary: View mahasiswa's own nilai records
+      description: Allows a mahasiswa to view their own encrypted nilai data along with RSA-encrypted AES keys for client-side decryption. The mahasiswa is authenticated via JWT, and their NIM is taken from the JWT token (req.user.nim_nip).
+      tags:
+        - Nilai
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Nilai records retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Nilai records retrieved successfully
+                  data:
+                    type: object
+                    properties:
+                      count:
+                        type: integer
+                        example: 3
+                      records:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: integer
+                              example: 1
+                            nim:
+                              type: string
+                              example: "10222069"
+                            nip_dosen:
+                              type: string
+                              example: "197812312019031002"
+                            encrypted_data:
+                              type: object
+                              properties:
+                                kode:
+                                  type: string
+                                  example: "encrypted_course_code"
+                                nama:
+                                  type: string
+                                  example: "encrypted_course_name"
+                                nilai:
+                                  type: string
+                                  example: "encrypted_grade"
+                            rsa_encrypted_aes_key:
+                              type: string
+                              example: "RSA_encrypted_AES_key_base64"
+                              description: RSA-encrypted AES key that can be decrypted by mahasiswa's private key
+        '400':
+          description: Bad request or unauthorized user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Unauthorized User
+                  data:
+                    type: object
+                    example: {}
+        '404':
+          description: No nilai records found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: No nilai records found for this mahasiswa
+                  data:
+                    type: object
+                    example: {}
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        message:
+          type: string
+          example: Bad Request
+        data:
+          type: object
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
