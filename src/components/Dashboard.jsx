@@ -18,8 +18,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { mataKuliahApi, nilaiApi, studentApi } from '../lib/api/sixvaultApi';
-import { decrypt as rsaDecrypt } from '../lib/crypto/RSA';
+import { mataKuliahApi, nilaiApi, studentApi, transcriptApi, kaprodiApi } from '../lib/api/sixvaultApi';
+import { decrypt as rsaDecrypt, sign as rsaSign, verify as rsaVerify } from '../lib/crypto/RSA';
 import AES from '../lib/crypto/AES';
 import { toast } from 'react-toastify';
 
@@ -59,16 +59,39 @@ const Dashboard = () => {
   const [gradesError, setGradesError] = useState('');
   const [decryptionStats, setDecryptionStats] = useState({ total: 0, successful: 0, failed: 0 });
   
+  // Signature management state
+  const [signatures, setSignatures] = useState([]);
+  const [isLoadingSignatures, setIsLoadingSignatures] = useState(false);
+  const [isSigningGrades, setIsSigningGrades] = useState(false);
+  
   // View student records state (for kaprodi and dosen_wali)
   const [viewStudentState, setViewStudentState] = useState({
     nim: '',
     studentName: '',
+    studentDosenWali: '',
     records: [],
     isLoading: false,
     isDecrypting: false,
     error: '',
     decryptionStats: { total: 0, successful: 0, failed: 0 },
-    hasSearched: false
+    hasSearched: false,
+    isDirectAccess: false,
+    hasActiveRequest: false,
+    requestStatus: '', // 'pending', 'approved', 'insufficient_approvals'
+    pendingRequestId: null,
+    approvals: [],
+    requiredApprovals: 3,
+    canCreateRequest: false,
+    isServerSideDecryption: false
+  });
+
+  // Request management state (for dosen_wali)
+  const [requestManagementState, setRequestManagementState] = useState({
+    pendingRequests: [],
+    approvedRequests: [],
+    isLoadingRequests: false,
+    lastChecked: null,
+    newRequestNotifications: []
   });
   
   // Autocomplete state for academic data form
@@ -79,6 +102,21 @@ const Dashboard = () => {
   // Available courses from API
   const [availableCourses, setAvailableCourses] = useState([]);
   const [isLoadingAvailableCourses, setIsLoadingAvailableCourses] = useState(true);
+
+  // Transcript generation state
+  const [transcriptModalOpen, setTranscriptModalOpen] = useState(false);
+  const [transcriptNim, setTranscriptNim] = useState('');
+  const [transcriptStudentName, setTranscriptStudentName] = useState('');
+  const [transcriptStudentData, setTranscriptStudentData] = useState([]);
+  const [transcriptEncrypted, setTranscriptEncrypted] = useState(false);
+  const [transcriptPassword, setTranscriptPassword] = useState('');
+  const [isGeneratingTranscript, setIsGeneratingTranscript] = useState(false);
+  const [generatedTranscriptUrl, setGeneratedTranscriptUrl] = useState('');
+  const [isLoadingTranscriptData, setIsLoadingTranscriptData] = useState(false);
+  
+  // Kaprodi data state
+  const [kaprodiList, setKaprodiList] = useState([]);
+  const [isLoadingKaprodi, setIsLoadingKaprodi] = useState(false);
 
   // Predefined course data
   const predefinedCourses = {
@@ -92,6 +130,41 @@ const Dashboard = () => {
     setUserData(data);
     setRsaKeys(keys);
   }, []);
+
+  // Load signatures only when accessing specific tabs that need them
+  useEffect(() => {
+    if (userData && (activeTab === 'grades' || activeTab === 'view-student')) {
+      loadSignatures();
+    }
+  }, [userData, activeTab]);
+
+  // Load kaprodi data when needed for transcript generation
+  useEffect(() => {
+    if (transcriptModalOpen && kaprodiList.length === 0) {
+      loadKaprodiData();
+    }
+  }, [transcriptModalOpen]);
+
+  // Load approved requests from localStorage when userData becomes available
+  useEffect(() => {
+    if (userData?.nim_nip) {
+      const savedApprovedRequests = localStorage.getItem(`approved_requests_${userData.nim_nip}`);
+      if (savedApprovedRequests) {
+        try {
+          const parsedRequests = JSON.parse(savedApprovedRequests);
+          setRequestManagementState(prev => ({
+            ...prev,
+            approvedRequests: parsedRequests
+          }));
+          console.log('[DEBUG] Loaded', parsedRequests.length, 'approved requests from localStorage');
+        } catch (error) {
+          console.error('[DEBUG] Error parsing saved approved requests:', error);
+          // Clear corrupted data
+          localStorage.removeItem(`approved_requests_${userData.nim_nip}`);
+        }
+      }
+    }
+  }, [userData?.nim_nip]);
 
   // Fetch available courses from API
   useEffect(() => {
@@ -148,6 +221,173 @@ const Dashboard = () => {
     }
   }, [userData, activeTab]);
 
+  // Polling for pending requests (dosen_wali only)
+  useEffect(() => {
+    if (userData?.type === 'dosen_wali') {
+      console.log('[DEBUG] Starting request polling for dosen_wali:', userData.nim_nip);
+      
+      const pollPendingRequests = async () => {
+        // Only poll if the tab is active to reduce API calls
+        if (document.hidden) {
+          return;
+        }
+        
+        try {
+          setRequestManagementState(prev => ({ ...prev, isLoadingRequests: true }));
+          const response = await nilaiApi.listPendingRequests();
+          
+          if (Array.isArray(response)) {
+                         // Include all requests: own requests + requests from colleagues that need approval
+             const currentUserRequests = response.filter(request => 
+               // Include own requests
+               request.requester_nip === userData.nim_nip ||
+               // Include requests where user has already interacted (approved)
+               (request.approvals || []).some(approval => approval.nip === userData.nim_nip) ||
+               // Include all other pending requests that might need approval (backend should filter by program studi)
+               (request.requester_nip !== userData.nim_nip && request.status === 'pending')
+             );
+             
+             console.log('[DEBUG] Raw API response:', response);
+             console.log('[DEBUG] Current user NIP:', userData.nim_nip);
+             console.log('[DEBUG] Filtered currentUserRequests:', currentUserRequests);
+            
+                         // Check for requests that became approved (3/3 approvals)
+             const newlyApprovedRequests = currentUserRequests.filter(request => {
+               const approvedCount = (request.approvals || []).filter(a => a.approved).length;
+               const isApproved = request.status === 'approved' || approvedCount >= 3;
+               const isMyRequest = request.requester_nip === userData.nim_nip;
+               
+               // Only consider it newly approved if it has enough approvals
+               return isApproved && isMyRequest && approvedCount >= 3;
+             });
+             
+             // Update approved requests - add newly approved ones and keep existing ones
+             setRequestManagementState(prev => {
+               const existingApprovedIds = prev.approvedRequests.map(req => `${req.nim}-${req.requester_nip}`);
+               const newApprovedToAdd = newlyApprovedRequests.filter(req => 
+                 !existingApprovedIds.includes(`${req.nim}-${req.requester_nip}`)
+               );
+               
+               const updatedApprovedRequests = [...prev.approvedRequests, ...newApprovedToAdd];
+               
+               // Save to localStorage
+               if (userData?.nim_nip) {
+                 localStorage.setItem(`approved_requests_${userData.nim_nip}`, JSON.stringify(updatedApprovedRequests));
+               }
+               
+               return {
+                 ...prev,
+                 approvedRequests: updatedApprovedRequests
+               };
+             });
+             
+             // Notifications removed for cleaner UX
+             
+                         // Check for requests that need notification
+             const lastChecked = requestManagementState.lastChecked;
+             let requestsToNotify = [];
+             
+             // Only show truly new requests since last check (avoid spam on first sign-in)
+             if (lastChecked) {
+                                requestsToNotify = currentUserRequests.filter(request => 
+                   new Date(request.created_at) > lastChecked &&
+                   request.requester_nip !== userData.nim_nip &&
+                   request.status === 'pending' &&
+                   !(request.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+                 );
+               console.log('[DEBUG] Showing new requests since last check:', requestsToNotify.length);
+             } else {
+               // First check: don't spam with notifications, user can check the dashboard
+               requestsToNotify = [];
+               console.log('[DEBUG] First check - not showing notifications to avoid spam');
+             }
+             
+                          // Show notifications for requests that need attention (removed for cleaner UX)
+            
+                         setRequestManagementState(prev => ({
+               ...prev,
+               pendingRequests: currentUserRequests,
+               lastChecked: new Date(),
+               newRequestNotifications: requestsToNotify
+             }));
+             
+             // Clean up shown notifications for completed/approved requests
+             const activeRequestIds = currentUserRequests.map(req => `${req.nim}-${req.requester_nip}`);
+             const shownNotifications = JSON.parse(localStorage.getItem('shown_request_notifications') || '[]');
+             const cleanedNotifications = shownNotifications.filter(notifId => activeRequestIds.includes(notifId));
+             if (cleanedNotifications.length !== shownNotifications.length) {
+               localStorage.setItem('shown_request_notifications', JSON.stringify(cleanedNotifications));
+               console.log('[DEBUG] Cleaned up', shownNotifications.length - cleanedNotifications.length, 'old notifications');
+             }
+          }
+        } catch (error) {
+          console.error('Error polling pending requests:', error);
+        } finally {
+          setRequestManagementState(prev => ({ ...prev, isLoadingRequests: false }));
+        }
+      };
+
+                    // Poll every 1 second
+       const interval = setInterval(pollPendingRequests, 1000);
+       
+       // Poll immediately when tab becomes visible again
+       const handleVisibilityChange = () => {
+         if (!document.hidden) {
+           pollPendingRequests();
+         }
+       };
+       document.addEventListener('visibilitychange', handleVisibilityChange);
+       
+       // Initial poll
+       pollPendingRequests();
+
+       return () => {
+         clearInterval(interval);
+         document.removeEventListener('visibilitychange', handleVisibilityChange);
+       };
+    }
+  }, [userData?.type, userData?.nim_nip]);
+
+  // Check request status when viewing student records
+  useEffect(() => {
+    if (viewStudentState.hasActiveRequest && viewStudentState.pendingRequestId) {
+      const checkRequestStatus = async () => {
+        try {
+          const response = await nilaiApi.listPendingRequests();
+          if (Array.isArray(response)) {
+            const currentRequest = response.find(request => 
+              request.nim === viewStudentState.nim && 
+              request.requester_nip === userData.nim_nip
+            );
+            
+            if (currentRequest) {
+              const approvedCount = (currentRequest.approvals || []).filter(approval => approval.approved).length;
+              
+              setViewStudentState(prev => ({
+                ...prev,
+                approvals: currentRequest.approvals || [],
+                requestStatus: currentRequest.status === 'approved' ? 'approved' : 
+                             approvedCount >= prev.requiredApprovals ? 'approved' : 'pending'
+              }));
+              
+                          // If approved, try to fetch the data using server-side decryption
+            if (currentRequest.status === 'approved' || approvedCount >= viewStudentState.requiredApprovals) {
+              console.log('[DEBUG] Request approved, using server-side decryption');
+              handleViewStudentSearch(true, true); // skipRequestCreation=true, useServerSideDecryption=true
+            }
+            }
+          }
+        } catch (error) {
+          console.error('Error checking request status:', error);
+        }
+      };
+      
+      // Check every 10 seconds for active requests
+      const interval = setInterval(checkRequestStatus, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [viewStudentState.hasActiveRequest, viewStudentState.pendingRequestId, userData?.nim_nip]);
+
   // Grade point mapping
   const gradePoints = {
     'A': 4.0,
@@ -156,6 +396,95 @@ const Dashboard = () => {
     'BC': 2.5,
     'C': 2.0,
     'D': 1.0
+  };
+
+  // Signature management functions
+  const loadSignatures = async () => {
+    setIsLoadingSignatures(true);
+    try {
+      const response = await nilaiApi.listSignatures();
+      if (response.status === 'success' && response.data) {
+        // According to openapi.yaml, response.data is directly the array of signatures
+        setSignatures(Array.isArray(response.data) ? response.data : []);
+      }
+    } catch (error) {
+      console.error('Error loading signatures:', error);
+      toast.error('Failed to load signatures');
+    } finally {
+      setIsLoadingSignatures(false);
+    }
+  };
+
+  const getSignatureForStudent = (nim) => {
+    return signatures.find(sig => sig.nim === nim);
+  };
+
+  const verifySignature = (signatureData, gradesData) => {
+    try {
+      // Create the JSON string in the same format as when signing
+      const sortedGrades = gradesData
+        .map(grade => ({ kode: grade.kode, nilai: grade.nilai }))
+        .sort((a, b) => a.kode.localeCompare(b.kode));
+      
+      const dataToVerify = JSON.stringify(sortedGrades);
+      
+      // Use the kaprodi public key from the signature data (from API)
+      const kaprodiPublicKey = signatureData.kaprodiPublicKey;
+      const signature = signatureData.signature;
+      
+      if (!kaprodiPublicKey || !signature) {
+        console.error('Missing kaprodi public key or signature data');
+        return false;
+      }
+      
+      // Verify the signature using the kaprodi's public key
+      return rsaVerify(dataToVerify, signature, kaprodiPublicKey);
+    } catch (error) {
+      console.error('Error verifying signature:', error);
+      return false;
+    }
+  };
+
+  const signStudentGrades = async (nim, gradesData) => {
+    if (userData?.type !== 'kaprodi') {
+      toast.error('Only program heads can sign academic records');
+      return;
+    }
+
+    setIsSigningGrades(true);
+    try {
+      // Get private key for signing
+      const privateKey = localStorage.getItem('rsa_private_key');
+      if (!privateKey) {
+        throw new Error('Private key not found. Please login again.');
+      }
+
+      // Create the JSON string with sorted grades
+      const sortedGrades = gradesData
+        .map(grade => ({ kode: grade.kode, nilai: grade.nilai }))
+        .sort((a, b) => a.kode.localeCompare(b.kode));
+      
+      const dataToSign = JSON.stringify(sortedGrades);
+      
+      // Sign the data
+      const signature = rsaSign(dataToSign, privateKey);
+      
+      // Upload signature to server
+      const response = await nilaiApi.signGrades(nim, signature);
+      
+      if (response.status === 'success') {
+        toast.success('Academic records signed successfully');
+        // Reload signatures to show the new one
+        await loadSignatures();
+      } else {
+        throw new Error(response.message || 'Failed to upload signature');
+      }
+    } catch (error) {
+      console.error('Error signing grades:', error);
+      toast.error(`Failed to sign grades: ${error.message}`);
+    } finally {
+      setIsSigningGrades(false);
+    }
   };
 
   // Calculate IPK automatically (moved to top level)
@@ -179,6 +508,314 @@ const Dashboard = () => {
       setIpk(0);
     }
   }, [studentData.mataKuliah, gradePoints]);
+
+  // Clean up old approved requests from localStorage
+  useEffect(() => {
+    if (userData?.nim_nip && requestManagementState.approvedRequests.length > 0) {
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const recentApprovedRequests = requestManagementState.approvedRequests.filter(request => {
+        const requestDate = new Date(request.created_at);
+        return requestDate > thirtyDaysAgo;
+      });
+      
+      // If we filtered out some old requests, update localStorage
+      if (recentApprovedRequests.length !== requestManagementState.approvedRequests.length) {
+        localStorage.setItem(`approved_requests_${userData.nim_nip}`, JSON.stringify(recentApprovedRequests));
+        console.log('[DEBUG] Cleaned up', requestManagementState.approvedRequests.length - recentApprovedRequests.length, 'old approved requests');
+      }
+    }
+  }, [userData?.nim_nip, requestManagementState.approvedRequests]);
+
+  // Load kaprodi data
+  const loadKaprodiData = async () => {
+    setIsLoadingKaprodi(true);
+    try {
+      const response = await kaprodiApi.listKaprodi();
+      if (response.status === 'success' && response.data) {
+        setKaprodiList(response.data);
+      }
+    } catch (error) {
+      console.error('Error loading kaprodi data:', error);
+      toast.error('Failed to load program head data');
+    } finally {
+      setIsLoadingKaprodi(false);
+    }
+  };
+
+  // Generate LaTeX template for transcript
+  const generateLatexTemplate = (nim, studentName, gradesData, signature, kaprodiName) => {
+    const prodiName = userData?.prodi === 'teknik_informatika' 
+      ? 'Teknik Informatika' 
+      : 'Sistem dan Teknologi Informasi';
+
+    // Calculate GPA
+    const validGrades = gradesData.filter(grade => 
+      grade.nilai && grade.sks && gradePoints[grade.nilai]
+    );
+    
+    const totalPoints = validGrades.reduce((sum, grade) => {
+      return sum + (gradePoints[grade.nilai] * parseInt(grade.sks || 0));
+    }, 0);
+    
+    const totalSks = validGrades.reduce((sum, grade) => {
+      return sum + parseInt(grade.sks || 0);
+    }, 0);
+    
+    const gpa = totalSks > 0 ? (totalPoints / totalSks).toFixed(2) : '0.00';
+
+    // Sort grades by course code for consistent display
+    const sortedGrades = [...gradesData].sort((a, b) => a.kode.localeCompare(b.kode));
+
+    // Generate table rows
+    const tableRows = sortedGrades.map((grade, index) => 
+      `${index + 1} & ${grade.kode} & ${grade.nama} & ${grade.sks} & ${grade.nilai} \\\\`
+    ).join('\n        ');
+
+    // Format signature for LaTeX (escape special characters and handle line breaks)
+    const formatSignatureForLatex = (signatureStr) => {
+      if (!signatureStr) return '';
+      
+      // Escape special LaTeX characters
+      let formatted = signatureStr
+        .replace(/\\/g, '\\textbackslash{}')
+        .replace(/\{/g, '\\{')
+        .replace(/\}/g, '\\}')
+        .replace(/\$/g, '\\$')
+        .replace(/&/g, '\\&')
+        .replace(/%/g, '\\%')
+        .replace(/#/g, '\\#')
+        .replace(/\^/g, '\\textasciicircum{}')
+        .replace(/_/g, '\\_')
+        .replace(/~/g, '\\textasciitilde{}');
+      
+      // Break long signatures into multiple lines for better display
+      if (formatted.length > 60) {
+        const chunks = [];
+        for (let i = 0; i < formatted.length; i += 60) {
+          chunks.push(formatted.substring(i, i + 60));
+        }
+        return chunks.join(' \\\\\\\\ \n\\texttt{');
+      }
+      
+      return formatted;
+    };
+
+    const latex = `\\documentclass[11pt,a4paper]{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage[margin=2cm]{geometry}
+\\usepackage{array}
+\\usepackage{longtable}
+\\usepackage{amsmath}
+\\usepackage{graphicx}
+\\usepackage{fancyhdr}
+
+\\pagestyle{fancy}
+\\fancyhf{}
+\\fancyhead[C]{Academic Transcript}
+\\fancyfoot[C]{\\thepage}
+
+\\begin{document}
+
+\\begin{center}
+{\\large\\textbf{Program Studi ${prodiName}}} \\\\
+{\\large\\textbf{Sekolah Teknik Elektro dan Informatika}} \\\\
+{\\large\\textbf{Institut Teknologi Bandung}} \\\\[1cm]
+
+{\\LARGE\\textbf{Academic Transcript}} \\\\[0.5cm]
+
+\\begin{tabular}{ll}
+Name: & ${studentName} \\\\
+NIM: & ${nim} \\\\
+\\end{tabular}
+\\end{center}
+
+\\vspace{1cm}
+
+\\begin{longtable}{|c|c|l|c|c|}
+\\hline
+\\textbf{No} & \\textbf{Kode MK} & \\textbf{Nama Mata Kuliah} & \\textbf{SKS} & \\textbf{Grade} \\\\
+\\hline
+\\endfirsthead
+
+\\hline
+\\textbf{No} & \\textbf{Kode MK} & \\textbf{Nama Mata Kuliah} & \\textbf{SKS} & \\textbf{Grade} \\\\
+\\hline
+\\endhead
+
+        ${tableRows}
+\\hline
+\\end{longtable}
+
+\\vspace{0.5cm}
+
+\\begin{center}
+\\begin{tabular}{ll}
+\\textbf{Total SKS:} & ${totalSks} \\\\
+\\textbf{Grade Point Average (GPA):} & ${gpa} \\\\
+\\end{tabular}
+\\end{center}
+
+\\vspace{2cm}
+
+\\begin{flushright}
+\\begin{minipage}{6cm}
+\\centering
+Ketua Program Studi \\\\[1cm]
+
+${signature ? `\\texttt{${formatSignatureForLatex(signature.signature)}}` : '\\textit{[Unsigned]}'} \\\\[0.5cm]
+
+${kaprodiName} \\\\
+\\end{minipage}
+\\end{flushright}
+
+\\end{document}`;
+
+    return latex;
+  };
+
+  // Handle opening transcript modal
+  const handleOpenTranscriptModal = async (nim, studentName, gradesData) => {
+    setIsLoadingTranscriptData(true);
+    try {
+      let finalNim = nim;
+      let finalStudentName = studentName;
+      let finalGradesData = gradesData;
+
+      // If this is a student downloading their own transcript, get data from localStorage and API
+      if (userData?.type === 'mahasiswa' && (!nim || !studentName)) {
+        console.log('[DEBUG] Student downloading own transcript, fetching data...');
+        
+        // Get NIM from localStorage or userData
+        finalNim = localStorage.getItem('user_nim_nip') || userData?.nim_nip;
+        
+        if (!finalNim) {
+          toast.error('Student NIM not found. Please login again.');
+          return;
+        }
+
+        console.log('[DEBUG] Using NIM:', finalNim);
+
+        // Get student name from API
+        try {
+          console.log('[DEBUG] Fetching student name from API...');
+          const studentResponse = await studentApi.searchStudent(finalNim);
+          if (studentResponse.status === 'success' && studentResponse.data?.nama) {
+            finalStudentName = studentResponse.data.nama;
+            console.log('[DEBUG] Got student name from API:', finalStudentName);
+          } else {
+            finalStudentName = userData?.nama || `Student ${finalNim}`;
+            console.log('[DEBUG] Using fallback name:', finalStudentName);
+          }
+        } catch (error) {
+          console.warn('Could not fetch student name from API, using fallback:', error);
+          finalStudentName = userData?.nama || `Student ${finalNim}`;
+        }
+
+        // Use student grades if not provided
+        if (!finalGradesData || finalGradesData.length === 0) {
+          finalGradesData = studentGrades;
+          console.log('[DEBUG] Using student grades, count:', finalGradesData?.length || 0);
+        }
+      }
+
+      console.log('[DEBUG] Final transcript data:', {
+        nim: finalNim,
+        name: finalStudentName,
+        recordsCount: finalGradesData?.length || 0
+      });
+
+      setTranscriptNim(finalNim);
+      setTranscriptStudentName(finalStudentName);
+      setTranscriptStudentData(finalGradesData || []);
+      setTranscriptEncrypted(false);
+      setTranscriptPassword('');
+      setGeneratedTranscriptUrl('');
+      setTranscriptModalOpen(true);
+    } catch (error) {
+      console.error('Error opening transcript modal:', error);
+      toast.error('Failed to open transcript generation dialog');
+    } finally {
+      setIsLoadingTranscriptData(false);
+    }
+  };
+
+  // Handle transcript generation
+  const handleGenerateTranscript = async () => {
+    if (!transcriptNim) {
+      toast.error('Student NIM is required for transcript generation');
+      return;
+    }
+
+    if (!transcriptStudentName) {
+      toast.error('Student name is required for transcript generation');
+      return;
+    }
+
+    if (!transcriptStudentData || transcriptStudentData.length === 0) {
+      toast.error('No academic records found for transcript generation');
+      return;
+    }
+
+    if (transcriptEncrypted && !transcriptPassword.trim()) {
+      toast.error('Password is required for encrypted transcripts');
+      return;
+    }
+
+    setIsGeneratingTranscript(true);
+    try {
+      // Get signature for the student
+      const signature = getSignatureForStudent(transcriptNim);
+      console.log('[DEBUG] Retrieved signature for student:', transcriptNim, signature);
+      
+      // Get kaprodi name for the student's program
+      const studentProdi = userData?.prodi; // For current user's prodi or derive from student data
+      const kaprodiForProdi = kaprodiList.find(k => k.prodi === studentProdi);
+      const kaprodiName = kaprodiForProdi?.nama || 'Program Head';
+
+      // Generate LaTeX template
+      const latexContent = generateLatexTemplate(
+        transcriptNim,
+        transcriptStudentName,
+        transcriptStudentData,
+        signature,
+        kaprodiName
+      );
+
+      // Call transcript generation API
+      const response = await transcriptApi.generateTranscript(
+        transcriptNim,
+        latexContent,
+        transcriptEncrypted,
+        transcriptEncrypted ? transcriptPassword : null
+      );
+
+      if (response.status === 'success' && response.data) {
+        setGeneratedTranscriptUrl(response.data.url);
+        toast.success('Transcript generated successfully!');
+      } else {
+        throw new Error(response.message || 'Failed to generate transcript');
+      }
+    } catch (error) {
+      console.error('Error generating transcript:', error);
+      toast.error(`Failed to generate transcript: ${error.message}`);
+    } finally {
+      setIsGeneratingTranscript(false);
+    }
+  };
+
+  // Handle closing transcript modal
+  const handleCloseTranscriptModal = () => {
+    setTranscriptModalOpen(false);
+    setTranscriptNim('');
+    setTranscriptStudentName('');
+    setTranscriptStudentData([]);
+    setTranscriptEncrypted(false);
+    setTranscriptPassword('');
+    setGeneratedTranscriptUrl('');
+    setIsLoadingTranscriptData(false);
+  };
 
   const handleLogout = () => {
     logout();
@@ -433,8 +1070,225 @@ const Dashboard = () => {
     }
   };
 
+  // Request management handlers
+  const handleApproveRequest = async (nim, requesterNip) => {
+    try {
+      const response = await nilaiApi.approveRequest(nim, requesterNip, userData.nim_nip);
+      if (response.message) {
+        // Remove this request from shown notifications since it's now approved by us
+        const requestId = `${nim}-${requesterNip}`;
+        const shownNotifications = JSON.parse(localStorage.getItem('shown_request_notifications') || '[]');
+        const updatedShownNotifications = shownNotifications.filter(notifId => notifId !== requestId);
+        localStorage.setItem('shown_request_notifications', JSON.stringify(updatedShownNotifications));
+        
+        // Refresh pending requests
+        const updatedRequests = await nilaiApi.listPendingRequests();
+        if (Array.isArray(updatedRequests)) {
+          setRequestManagementState(prev => ({
+            ...prev,
+            pendingRequests: updatedRequests.filter(request => 
+              request.requester_nip === userData.nim_nip ||
+              request.approvals.some(approval => approval.nip === userData.nim_nip)
+            )
+          }));
+        }
+      }
+    } catch (error) {
+      console.error('Error approving request:', error);
+      // Error notifications removed for cleaner UX
+    }
+  };
+
+  // Handle viewing decrypted records for approved requests
+  const handleViewDecryptedRecords = async (nim, studentName) => {
+    try {
+      console.log('[DEBUG] Starting to view decrypted records for student:', nim);
+      
+      // Set loading state
+      setViewStudentState(prev => ({
+        ...prev,
+        nim: nim,
+        studentName: studentName || '',
+        isLoading: true,
+        isDecrypting: false,
+        error: '',
+        records: [],
+        decryptionStats: { total: 0, successful: 0, failed: 0 },
+        hasSearched: false,
+        isDirectAccess: false,
+        hasActiveRequest: true,
+        requestStatus: 'approved',
+        isServerSideDecryption: true
+      }));
+
+      // Switch to View Student Records tab
+      setActiveTab('view-student');
+
+      // Try to get the actual student name
+      let actualStudentName = studentName || `Student ${nim}`;
+      try {
+        const studentSearchResponse = await studentApi.searchStudent(nim);
+        actualStudentName = studentSearchResponse.data?.nama || actualStudentName;
+        
+        setViewStudentState(prev => ({
+          ...prev,
+          studentName: actualStudentName
+        }));
+        
+        console.log('[DEBUG] Found student name:', actualStudentName);
+      } catch (nameError) {
+        console.warn('[DEBUG] Could not fetch student name:', nameError);
+        // Continue with provided name or fallback
+      }
+
+      // Start server-side decryption process
+      setViewStudentState(prev => ({
+        ...prev,
+        isLoading: false,
+        isDecrypting: true,
+        hasSearched: true
+      }));
+      
+      try {
+        const serverDecryptResponse = await nilaiApi.decryptAllStudentGrades(nim);
+        
+        if (serverDecryptResponse.status === 'success' && serverDecryptResponse.data) {
+          const serverDecryptedRecords = serverDecryptResponse.data.records || [];
+          const total = serverDecryptResponse.data.total || 0;
+          const successful = serverDecryptResponse.data.count || 0;
+          const failed = total - successful;
+          const errors = serverDecryptResponse.data.errors || [];
+          
+          // Enhance records with SKS from available courses if needed
+          const enhancedRecords = serverDecryptedRecords.map(record => {
+            let sks = record.sks || '0';
+            if (sks === '0') {
+              const matchingCourse = availableCourses.find(course => 
+                course.kode === record.kode
+              );
+              if (matchingCourse) {
+                sks = matchingCourse.sks;
+              }
+            }
+            return { ...record, sks };
+          });
+          
+          setViewStudentState(prev => ({
+            ...prev,
+            records: enhancedRecords,
+            isDecrypting: false,
+            decryptionStats: { total, successful, failed }
+          }));
+          
+          // Decryption messaging removed for cleaner UX
+          if (failed > 0 && errors.length > 0) {
+            console.warn('[DEBUG] Server-side decryption errors:', errors);
+          }
+          
+          if (enhancedRecords.length === 0 && total > 0) {
+            setViewStudentState(prev => ({
+              ...prev,
+              error: 'Failed to decrypt all grade records using server-side decryption.'
+            }));
+          }
+        } else {
+          throw new Error('Server-side decryption failed: Invalid response');
+        }
+      } catch (serverDecryptError) {
+        console.error('[DEBUG] Server-side decryption failed:', serverDecryptError);
+        setViewStudentState(prev => ({
+          ...prev,
+          error: `Server-side decryption failed: ${serverDecryptError.message}`,
+          isDecrypting: false
+        }));
+      }
+    } catch (error) {
+      console.error('[DEBUG] Error in handleViewDecryptedRecords:', error);
+      setViewStudentState(prev => ({
+        ...prev,
+        error: `Error viewing decrypted records: ${error.message}`,
+        isLoading: false,
+        isDecrypting: false
+      }));
+    }
+  };
+
+  const createAccessRequest = async (nim, studentName) => {
+    try {
+      console.log('[DEBUG] Creating access request for student:', nim, 'by requester:', userData.nim_nip);
+      
+      setViewStudentState(prev => ({
+        ...prev,
+        isLoading: true,
+        error: ''
+      }));
+
+      const response = await nilaiApi.requestAccess(nim, userData.nim_nip);
+      console.log('[DEBUG] Request response:', response);
+      
+      if (response.id) {
+        // Automatically approve own request
+        console.log('[DEBUG] Auto-approving own request...');
+        try {
+          await nilaiApi.approveRequest(nim, userData.nim_nip, userData.nim_nip);
+          console.log('[DEBUG] Auto-approval successful');
+          
+          setViewStudentState(prev => ({
+            ...prev,
+            hasActiveRequest: true,
+            requestStatus: 'pending',
+            pendingRequestId: response.id,
+            isLoading: false
+          }));
+        } catch (approveError) {
+          console.error('[DEBUG] Auto-approval failed:', approveError);
+          
+          setViewStudentState(prev => ({
+            ...prev,
+            hasActiveRequest: true,
+            requestStatus: 'pending',
+            pendingRequestId: response.id,
+            isLoading: false
+          }));
+        }
+      }
+    } catch (error) {
+      console.error('Error creating access request:', error);
+      let errorMessage = error.message;
+      
+      if (error.message.includes('Request already exists')) {
+        errorMessage = 'Access request already exists for this student. Please wait for approval.';
+        // Check existing request status
+        try {
+          const pendingRequests = await nilaiApi.listPendingRequests();
+          const existingRequest = pendingRequests.find(request => 
+            request.nim === nim && request.requester_nip === userData.nim_nip
+          );
+          
+          if (existingRequest) {
+            setViewStudentState(prev => ({
+              ...prev,
+              hasActiveRequest: true,
+              requestStatus: existingRequest.status,
+              pendingRequestId: existingRequest.id,
+              approvals: existingRequest.approvals || []
+            }));
+          }
+        } catch (fetchError) {
+          console.error('Error fetching existing request:', fetchError);
+        }
+      }
+      
+      setViewStudentState(prev => ({
+        ...prev,
+        error: errorMessage,
+        isLoading: false
+      }));
+    }
+  };
+
   // View student records functions (for kaprodi and dosen_wali)
-  const handleViewStudentSearch = async () => {
+  const handleViewStudentSearch = async (skipRequestCreation = false, useServerSideDecryption = false) => {
     if (!viewStudentState.nim.trim()) {
       toast.error('Please enter a valid NIM');
       return;
@@ -447,8 +1301,15 @@ const Dashboard = () => {
       error: '',
       records: [],
       studentName: '',
+      studentDosenWali: '',
       decryptionStats: { total: 0, successful: 0, failed: 0 },
-      hasSearched: false
+      hasSearched: false,
+      isDirectAccess: false,
+      hasActiveRequest: false,
+      requestStatus: '',
+      approvals: [],
+      canCreateRequest: false,
+      isServerSideDecryption: useServerSideDecryption
     }));
 
     try {
@@ -456,17 +1317,170 @@ const Dashboard = () => {
       const studentSearchResponse = await studentApi.searchStudent(viewStudentState.nim.trim());
       const studentName = studentSearchResponse.data?.nama || 'Unknown Student';
 
-      // Then, get their grade records
-      const response = await nilaiApi.getStudentGrades(viewStudentState.nim.trim());
+      // Update student name first
+      setViewStudentState(prev => ({
+        ...prev,
+        studentName
+      }));
+
+      // Then, try to get their grade records
+      let response;
+      let hasDirectAccess = false;
+      let isUnauthorizedAccess = false;
       
-      if (response.status === 'success' && response.data) {
+      try {
+        response = await nilaiApi.getStudentGrades(viewStudentState.nim.trim());
+        console.log('[DEBUG] Raw API response:', response);
+        
+        // Check if the response indicates unauthorized access (even with 200 status)
+        if (response.status === 'error' && response.message &&
+            (response.message.includes('Unauthorized') || 
+             response.message.includes('not authorized') ||
+             response.message.includes('Unauthorized to view this data') ||
+             response.message.includes('Request for group based decryption') ||
+             response.message.includes('Forbidden'))) {
+          console.log('[DEBUG] API returned error status:', response.message);
+          isUnauthorizedAccess = true;
+        }
+        
+        // Additional check for different possible error formats
+        if (!isUnauthorizedAccess && (response.error || 
+            (response.message && (response.message.includes('Unauthorized') || 
+                                 response.message.includes('not authorized') ||
+                                 response.message.includes('Request for group based decryption') ||
+                                 response.message.includes('Forbidden'))))) {
+          console.log('[DEBUG] API returned error in different format:', response);
+          isUnauthorizedAccess = true;
+        }
+        
+        if (isUnauthorizedAccess) {
+          // Don't throw error here, handle it in the logic below
+          console.log('[DEBUG] Detected unauthorized access via response check');
+        } else {
+          hasDirectAccess = true;
+        }
+      } catch (gradesError) {
+        console.log('[DEBUG] Grades Error caught:', gradesError.message);
+        // Check if this is an unauthorized access error
+        if (gradesError.message.includes('403') || 
+            gradesError.message.includes('Unauthorized') ||
+            gradesError.message.includes('Unauthorized to view this data') ||
+            gradesError.message.includes('Forbidden')) {
+          console.log('[DEBUG] Detected unauthorized access via catch block');
+          isUnauthorizedAccess = true;
+        } else {
+          // This is a different kind of error, re-throw it
+          console.log('[DEBUG] Non-unauthorized error, re-throwing:', gradesError.message);
+          throw gradesError;
+        }
+      }
+      
+      // Handle unauthorized access
+      if (isUnauthorizedAccess) {
+        console.log('[DEBUG] Processing unauthorized access, user type:', userData?.type, 'skipRequestCreation:', skipRequestCreation);
+        
+        // For dosen_wali, we can create a request for students not under their supervision
+        if (userData?.type === 'dosen_wali' && !skipRequestCreation) {
+          console.log('[DEBUG] Proceeding with request creation logic for dosen_wali');
+          // Check if there's already a pending request
+          try {
+            const pendingRequests = await nilaiApi.listPendingRequests();
+            const existingRequest = pendingRequests.find(request => 
+              request.nim === viewStudentState.nim.trim() && 
+              request.requester_nip === userData.nim_nip
+            );
+            
+            if (existingRequest) {
+              console.log('[DEBUG] Found existing request:', existingRequest);
+              const approvedCount = (existingRequest.approvals || []).filter(approval => approval.approved).length;
+              
+              setViewStudentState(prev => ({
+                ...prev,
+                hasActiveRequest: true,
+                requestStatus: existingRequest.status === 'approved' || approvedCount >= prev.requiredApprovals ? 'approved' : 'pending',
+                pendingRequestId: existingRequest.id,
+                approvals: existingRequest.approvals || [],
+                hasSearched: true,
+                isLoading: false
+              }));
+              
+              // Request status info removed for cleaner UX
+              
+              if (existingRequest.status === 'approved' || approvedCount >= viewStudentState.requiredApprovals) {
+                console.log('[DEBUG] Existing request is approved, will use server-side decryption');
+                // Approved request - we'll use server-side decryption later in the flow
+                // Set flags to indicate we have an approved request
+                setViewStudentState(prev => ({
+                  ...prev,
+                  hasActiveRequest: true,
+                  requestStatus: 'approved',
+                  pendingRequestId: existingRequest.id,
+                  approvals: existingRequest.approvals || [],
+                  hasSearched: true,
+                  isLoading: false,
+                  isServerSideDecryption: true
+                }));
+                
+                // Trigger server-side decryption directly
+                handleViewStudentSearch(true, true); // skipRequestCreation=true, useServerSideDecryption=true
+                return;
+              } else {
+                // Show pending request status (notifications removed for cleaner UX)
+                return;
+              }
+            } else {
+              // Show button to create request instead of auto-creating
+              console.log('[DEBUG] No existing request found, showing request button');
+              setViewStudentState(prev => ({
+                ...prev,
+                error: '',
+                hasSearched: true,
+                isLoading: false,
+                canCreateRequest: true
+              }));
+              return;
+            }
+          } catch (requestError) {
+            console.error('[DEBUG] Error checking pending requests:', requestError);
+            setViewStudentState(prev => ({
+              ...prev,
+              error: 'Unable to access student records. You may need to request access from other faculty members.',
+              hasSearched: true,
+              isLoading: false
+            }));
+            return;
+          }
+        } else if (userData?.type === 'kaprodi') {
+          // Kaprodi should have direct access to all students in their program, so this is a real error
+          console.log('[DEBUG] Kaprodi unauthorized access - this should not happen');
+          setViewStudentState(prev => ({
+            ...prev,
+            error: 'Unauthorized access. You may not have permission to view this student\'s records.',
+            hasSearched: true,
+            isLoading: false
+          }));
+          return;
+        } else {
+          // Other user types or skipRequestCreation=true
+          console.log('[DEBUG] Cannot create request - user type or skip flag');
+          setViewStudentState(prev => ({
+            ...prev,
+            error: 'Unauthorized to view this data. You may need to request access.',
+            hasSearched: true,
+            isLoading: false
+          }));
+          return;
+        }
+      }
+      
+              if (response.status === 'success' && response.data) {
         const encryptedRecords = response.data.records || [];
         
         setViewStudentState(prev => ({
           ...prev,
-          studentName,
           hasSearched: true,
-          isLoading: false
+          isLoading: false,
+          isDirectAccess: hasDirectAccess
         }));
 
         if (encryptedRecords.length === 0) {
@@ -478,6 +1492,76 @@ const Dashboard = () => {
           return;
         }
 
+        // Check if we should use server-side decryption (for approved group requests)
+        if (useServerSideDecryption) {
+          console.log('[DEBUG] Using server-side decryption for approved group request');
+          
+          // Start server-side decryption process
+          setViewStudentState(prev => ({
+            ...prev,
+            isDecrypting: true
+          }));
+          
+          try {
+            const serverDecryptResponse = await nilaiApi.decryptAllStudentGrades(viewStudentState.nim.trim());
+            
+            if (serverDecryptResponse.status === 'success' && serverDecryptResponse.data) {
+              const serverDecryptedRecords = serverDecryptResponse.data.records || [];
+              const total = serverDecryptResponse.data.total || 0;
+              const successful = serverDecryptResponse.data.count || 0;
+              const failed = total - successful;
+              const errors = serverDecryptResponse.data.errors || [];
+              
+              // Enhance records with SKS from available courses if needed
+              const enhancedRecords = serverDecryptedRecords.map(record => {
+                let sks = record.sks || '0';
+                if (sks === '0') {
+                  const matchingCourse = availableCourses.find(course => 
+                    course.kode === record.kode
+                  );
+                  if (matchingCourse) {
+                    sks = matchingCourse.sks;
+                  }
+                }
+                return { ...record, sks };
+              });
+              
+              setViewStudentState(prev => ({
+                ...prev,
+                records: enhancedRecords,
+                isDecrypting: false,
+                decryptionStats: { total, successful, failed }
+              }));
+              
+              // Decryption results messaging removed for cleaner UX
+              if (failed > 0 && errors.length > 0) {
+                console.warn('[DEBUG] Server-side decryption errors:', errors);
+              }
+              
+              if (enhancedRecords.length === 0 && total > 0) {
+                setViewStudentState(prev => ({
+                  ...prev,
+                  error: 'Failed to decrypt all grade records using server-side decryption.'
+                }));
+              }
+            } else {
+              throw new Error('Server-side decryption failed: Invalid response');
+            }
+          } catch (serverDecryptError) {
+            console.error('[DEBUG] Server-side decryption failed:', serverDecryptError);
+            setViewStudentState(prev => ({
+              ...prev,
+              error: `Server-side decryption failed: ${serverDecryptError.message}`,
+              isDecrypting: false
+            }));
+          }
+          
+          return; // Exit early for server-side decryption
+        }
+
+        // Continue with client-side decryption (original flow)
+        console.log('[DEBUG] Using client-side decryption for direct access');
+        
         // Get user's private key for RSA decryption
         const privateKey = localStorage.getItem('rsa_private_key');
         if (!privateKey) {
@@ -567,14 +1651,7 @@ const Dashboard = () => {
           isDecrypting: false
         }));
         
-        // Show final results
-        if (successful > 0) {
-          toast.success(`Successfully decrypted ${successful} out of ${total} grade records.`);
-        }
-        
-        if (failed > 0) {
-          toast.warning(`Failed to decrypt ${failed} out of ${total} grade records.`);
-        }
+        // Final results messaging removed for cleaner UX
         
         if (decryptedRecords.length === 0 && encryptedRecords.length > 0) {
           setViewStudentState(prev => ({
@@ -591,14 +1668,14 @@ const Dashboard = () => {
         }));
       }
     } catch (error) {
-      console.error('Error loading student records:', error);
+      console.error('[DEBUG] Outer catch - Error loading student records:', error);
       let errorMessage = `Error loading student records: ${error.message}`;
       
-      // Handle specific error cases
-      if (error.message.includes('403') || error.message.includes('Unauthorized')) {
-        errorMessage = 'You do not have permission to view this student\'s records.';
-      } else if (error.message.includes('404')) {
+      // Handle specific error cases (but not Unauthorized - that's handled in inner catch for request creation)
+      if (error.message.includes('404')) {
         errorMessage = 'Student not found or no records available.';
+      } else if (error.message.includes('Network')) {
+        errorMessage = 'Network error. Please check your connection and try again.';
       }
       
       setViewStudentState(prev => ({
@@ -623,7 +1700,14 @@ const Dashboard = () => {
       error: '',
       records: [],
       studentName: '',
+      studentDosenWali: '',
       hasSearched: false,
+      isDirectAccess: false,
+      hasActiveRequest: false,
+      requestStatus: '',
+      approvals: [],
+      canCreateRequest: false,
+      isServerSideDecryption: false,
       decryptionStats: { total: 0, successful: 0, failed: 0 }
     }));
   };
@@ -632,12 +1716,21 @@ const Dashboard = () => {
     setViewStudentState({
       nim: '',
       studentName: '',
+      studentDosenWali: '',
       records: [],
       isLoading: false,
       isDecrypting: false,
       error: '',
       decryptionStats: { total: 0, successful: 0, failed: 0 },
-      hasSearched: false
+      hasSearched: false,
+      isDirectAccess: false,
+      hasActiveRequest: false,
+      requestStatus: '',
+      pendingRequestId: null,
+      approvals: [],
+      requiredApprovals: 3,
+      canCreateRequest: false,
+      isServerSideDecryption: false
     });
   };
 
@@ -889,7 +1982,8 @@ const Dashboard = () => {
     ...(userData?.type === 'mahasiswa' ? [{ id: 'grades', label: 'My Grades', icon: BookOpen }] : []),
     ...(userData?.type === 'dosen_wali' ? [
       { id: 'academic', label: 'Academic Data', icon: GraduationCap },
-      { id: 'view-student', label: 'View Student Records', icon: FileText }
+      { id: 'view-student', label: 'View Student Records', icon: FileText },
+      { id: 'group-requests', label: 'Group Based Decryption', icon: Users }
     ] : []),
     ...(userData?.type === 'kaprodi' ? [
       { id: 'courses', label: 'Course Management', icon: Settings },
@@ -1541,6 +2635,69 @@ const Dashboard = () => {
             </div>
           )}
 
+          {/* Signature Status */}
+          {!isLoadingGrades && !isDecryptingGrades && studentGrades.length > 0 && (
+            <div className="mb-6">
+              {(() => {
+                                 const signature = getSignatureForStudent(userData?.nim_nip);
+                 if (signature) {
+                   const verificationResult = verifySignature(signature, studentGrades);
+                   const isVerified = verificationResult === true;
+                   const verificationFailed = verificationResult === false;
+                  
+                                     return (
+                     <div className={`p-4 rounded-lg border ${
+                       isVerified 
+                         ? 'bg-blue-50 border-blue-200' 
+                         : 'bg-red-50 border-red-200'
+                     }`}>
+                       <div className="flex items-start space-x-2">
+                         <div className="text-lg">
+                           {isVerified ? '✅' : '❌'}
+                         </div>
+                         <div className="flex-1">
+                           <p className={`font-medium ${
+                             isVerified ? 'text-blue-800' : 'text-red-800'
+                           }`}>
+                             Academic Records {isVerified ? 'Verified' : 'Verification Failed'} by Program Head
+                           </p>
+                           <p className={`text-sm ${
+                             isVerified ? 'text-blue-600' : 'text-red-600'
+                           }`}>
+                             {isVerified 
+                               ? 'Your academic records have been digitally signed and verified by the program head (Kaprodi).'
+                               : 'Signature verification failed. The academic data may have been tampered with or the signature is invalid.'
+                             }
+                           </p>
+                           {signature.signature && (
+                             <div className="mt-2 p-2 bg-gray-100 rounded text-xs">
+                               <p className="font-medium text-gray-700 mb-1">Digital Signature (SHA3):</p>
+                               <p className="font-mono text-gray-600 break-all">{signature.signature}</p>
+                             </div>
+                           )}
+                         </div>
+                       </div>
+                     </div>
+                   );
+                } else {
+                  return (
+                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                      <div className="flex items-start space-x-2">
+                        <div className="text-lg">📝</div>
+                        <div>
+                          <p className="text-gray-800 font-medium">Academic Records Unsigned</p>
+                          <p className="text-gray-600 text-sm">
+                            Your academic records have not yet been digitally signed by the program head (Kaprodi).
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+              })()}
+            </div>
+          )}
+
           {/* Grades Table */}
           {!isLoadingGrades && !isDecryptingGrades && !gradesError && studentGrades.length > 0 && (
             <div className="overflow-x-auto">
@@ -1581,6 +2738,25 @@ const Dashboard = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Download Transcript Button */}
+          {!isLoadingGrades && !isDecryptingGrades && !gradesError && studentGrades.length > 0 && (
+            <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-lg font-semibold text-gray-900">Official Academic Transcript</h4>
+                  <p className="text-sm text-gray-600">Download your complete academic transcript as a PDF document</p>
+                </div>
+                                 <button
+                   onClick={() => handleOpenTranscriptModal(null, null, null)}
+                   className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                 >
+                   <FileText className="h-4 w-4" />
+                   <span>Download Transcript</span>
+                 </button>
+              </div>
             </div>
           )}
 
@@ -1705,7 +2881,7 @@ const Dashboard = () => {
                 <p>
                   {userData?.type === 'kaprodi' 
                     ? `As a Program Head, you can view academic records for students in the ${userData?.prodi === 'teknik_informatika' ? 'Teknik Informatika' : 'Sistem dan Teknologi Informasi'} program.`
-                    : 'As an Academic Advisor, you can view academic records for students assigned to you as their dosen wali.'
+                    : 'As an Academic Advisor, you can view academic records for students assigned to you as their dosen wali. For other students in your program, you can request access through Shamir Secret Sharing consensus from your colleagues.'
                   }
                 </p>
               </div>
@@ -1761,14 +2937,23 @@ const Dashboard = () => {
           {/* Decryption State */}
           {viewStudentState.isDecrypting && (
             <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto mb-4"></div>
-              <p className="text-gray-600 mb-2">Decrypting student records...</p>
+              <div className={`animate-spin rounded-full h-8 w-8 border-b-2 mx-auto mb-4 ${
+                viewStudentState.isServerSideDecryption ? 'border-purple-600' : 'border-green-600'
+              }`}></div>
+              <p className="text-gray-600 mb-2">
+                {viewStudentState.isServerSideDecryption 
+                  ? 'Decrypting student records using Shamir Secret Sharing group consensus...'
+                  : 'Decrypting student records using your private key...'
+                }
+              </p>
               {viewStudentState.decryptionStats.total > 0 && (
                 <div className="text-sm text-gray-500">
                   <p>Progress: {viewStudentState.decryptionStats.successful + viewStudentState.decryptionStats.failed} / {viewStudentState.decryptionStats.total}</p>
                   <div className="w-full bg-gray-200 rounded-full h-2 mt-2 max-w-xs mx-auto">
                     <div 
-                      className="bg-green-600 h-2 rounded-full transition-all duration-300"
+                      className={`h-2 rounded-full transition-all duration-300 ${
+                        viewStudentState.isServerSideDecryption ? 'bg-purple-600' : 'bg-green-600'
+                      }`}
                       style={{ width: `${((viewStudentState.decryptionStats.successful + viewStudentState.decryptionStats.failed) / viewStudentState.decryptionStats.total) * 100}%` }}
                     ></div>
                   </div>
@@ -1790,9 +2975,189 @@ const Dashboard = () => {
             </div>
           )}
 
+          {/* Request Creation Button for Non-Assigned Students */}
+          {userData?.type === 'dosen_wali' && viewStudentState.canCreateRequest && viewStudentState.hasSearched && viewStudentState.studentName && (
+            <div className="bg-orange-50 p-4 rounded-lg border border-orange-200 mb-6">
+              <div className="flex items-start space-x-2">
+                <Users className="h-5 w-5 text-orange-600 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-orange-800 font-medium">Cross-Program Access Required</p>
+                  <p className="text-orange-600 text-sm mb-3">
+                    Student <strong>{viewStudentState.studentName}</strong> (NIM: {viewStudentState.nim}) is not assigned to you as their academic advisor. 
+                    You can request access to their academic records through group-based decryption using Shamir Secret Sharing. 
+                    You will automatically provide the first approval (1/3), and 2 colleague approvals will be needed.
+                  </p>
+                  <button
+                    onClick={async () => {
+                      await createAccessRequest(viewStudentState.nim, viewStudentState.studentName);
+                      setViewStudentState(prev => ({ ...prev, canCreateRequest: false }));
+                    }}
+                    className="flex items-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+                  >
+                    <Key className="h-4 w-4" />
+                    <span>Request Group Access</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Request Status for Dosen Wali */}
+          {userData?.type === 'dosen_wali' && viewStudentState.hasActiveRequest && !viewStudentState.isLoading && !viewStudentState.isDecrypting && (
+            <div className="space-y-4 mb-6">
+              {/* Request Status Card */}
+              <div className={`p-4 rounded-lg border ${
+                viewStudentState.requestStatus === 'approved' 
+                  ? 'bg-green-50 border-green-200' 
+                  : 'bg-yellow-50 border-yellow-200'
+              }`}>
+                <div className="flex items-start space-x-2">
+                  <Shield className={`h-5 w-5 mt-0.5 ${
+                    viewStudentState.requestStatus === 'approved' ? 'text-green-600' : 'text-yellow-600'
+                  }`} />
+                  <div className="flex-1">
+                    <p className={`font-medium ${
+                      viewStudentState.requestStatus === 'approved' ? 'text-green-800' : 'text-yellow-800'
+                    }`}>
+                      {viewStudentState.requestStatus === 'approved' 
+                        ? 'Access Request Approved' 
+                        : 'Access Request Pending'}
+                    </p>
+                    <p className={`text-sm mt-1 ${
+                      viewStudentState.requestStatus === 'approved' ? 'text-green-600' : 'text-yellow-600'
+                    }`}>
+                      {viewStudentState.requestStatus === 'approved'
+                        ? `Your request to view ${viewStudentState.studentName}'s academic records has been approved through Shamir Secret Sharing consensus.`
+                        : `Your request to view ${viewStudentState.studentName}'s academic records is waiting for colleague approval. You auto-approved (1/3), ${(viewStudentState.approvals || []).filter(a => a.approved).length} of ${viewStudentState.requiredApprovals} total approvals received.`
+                      }
+                    </p>
+                    
+                    {/* Approval Progress */}
+                    {viewStudentState.requestStatus === 'pending' && viewStudentState.approvals.length > 0 && (
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
+                          <span>Approval Progress</span>
+                          <span>{viewStudentState.approvals.filter(a => a.approved).length} / {viewStudentState.requiredApprovals}</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div 
+                            className="bg-yellow-600 h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${(viewStudentState.approvals.filter(a => a.approved).length / viewStudentState.requiredApprovals) * 100}%` }}
+                          ></div>
+                        </div>
+                        
+                        {/* Approval Details */}
+                        <div className="mt-2 space-y-1">
+                          {viewStudentState.approvals.map((approval, index) => (
+                            <div key={index} className="flex items-center justify-between text-xs">
+                              <span className="text-gray-600">Faculty NIP: {approval.nip}</span>
+                              <span className={`font-medium ${approval.approved ? 'text-green-600' : 'text-gray-400'}`}>
+                                {approval.approved ? '✓ Approved' : '⏳ Pending'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Shamir Secret Sharing Info */}
+              <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
+                <div className="flex items-start space-x-2">
+                  <Key className="h-5 w-5 text-purple-600 mt-0.5" />
+                  <div>
+                    <p className="text-purple-800 font-medium">Shamir Secret Sharing Access Control</p>
+                    <p className="text-purple-600 text-sm mt-1">
+                      To access this student's encrypted academic records, a minimum of {viewStudentState.requiredApprovals} faculty members 
+                      from your program must approve the request. You automatically provide the first approval, and {viewStudentState.requiredApprovals - 1} additional 
+                      colleague approvals are needed. This ensures secure, distributed access control where no single 
+                      person can access student data without proper authorization.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Pending Requests for Approval (Dosen Wali) */}
+          {userData?.type === 'dosen_wali' && requestManagementState.pendingRequests.length > 0 && activeTab === 'view-student' && (
+            <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+              <h4 className="text-lg font-semibold text-gray-900 mb-3">Pending Approval Requests</h4>
+              <p className="text-sm text-blue-700 mb-4">
+                You have {requestManagementState.pendingRequests.filter(req => 
+                  req.requester_nip !== userData.nim_nip && 
+                  !(req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+                ).length} requests waiting for your approval.
+              </p>
+              
+              <div className="space-y-3">
+                {requestManagementState.pendingRequests
+                  .filter(req => 
+                    req.requester_nip !== userData.nim_nip && 
+                    !(req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+                  )
+                  .slice(0, 3)
+                  .map((request, index) => (
+                    <div key={index} className="bg-white p-3 rounded border border-blue-200">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">
+                            Student NIM: {request.nim}
+                          </p>
+                          <p className="text-xs text-gray-600">
+                            Requested by: NIP {request.requester_nip}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            Approvals: {(request.approvals || []).filter(a => a.approved).length} / {viewStudentState.requiredApprovals}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleApproveRequest(request.nim, request.requester_nip)}
+                          className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 transition-colors"
+                        >
+                          Approve
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+              
+              {requestManagementState.pendingRequests.filter(req => 
+                req.requester_nip !== userData.nim_nip && 
+                !(req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+              ).length > 3 && (
+                <p className="text-xs text-blue-600 mt-2">
+                  ...and {requestManagementState.pendingRequests.filter(req => 
+                    req.requester_nip !== userData.nim_nip && 
+                    !(req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+                  ).length - 3} more requests.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Student Info and Results */}
           {!viewStudentState.isLoading && !viewStudentState.isDecrypting && viewStudentState.hasSearched && viewStudentState.studentName && !viewStudentState.error && (
             <div className="space-y-6">
+              {/* Group-Based Access Notification */}
+              {viewStudentState.isServerSideDecryption && viewStudentState.requestStatus === 'approved' && (
+                <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
+                  <div className="flex items-start space-x-2">
+                    <Users className="h-5 w-5 text-purple-600 mt-0.5" />
+                    <div>
+                      <p className="text-purple-800 font-medium">Group-Based Access Granted</p>
+                      <p className="text-purple-600 text-sm mt-1">
+                        You are viewing this student's academic records through <strong>Shamir Secret Sharing group-based decryption</strong>. 
+                        This access was granted after obtaining the required 3/3 faculty approvals from your colleagues. 
+                        The decryption was performed server-side using the reconstructed keys from the approved consensus.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Student Header */}
               <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
                 <h4 className="text-lg font-semibold text-gray-900 mb-2">Student Information</h4>
@@ -1800,11 +3165,17 @@ const Dashboard = () => {
                   <div>
                     <p><span className="font-medium">NIM:</span> {viewStudentState.nim}</p>
                     <p><span className="font-medium">Name:</span> {viewStudentState.studentName}</p>
+                    {viewStudentState.isServerSideDecryption && (
+                      <p><span className="font-medium">Access Method:</span> <span className="text-purple-600 font-medium">Group-Based Decryption</span></p>
+                    )}
                   </div>
                   <div>
                     <p><span className="font-medium">Total Records:</span> {viewStudentState.records.length}</p>
                     {viewStudentState.decryptionStats.total > 0 && (
                       <p><span className="font-medium">Decryption Success:</span> {viewStudentState.decryptionStats.successful} / {viewStudentState.decryptionStats.total}</p>
+                    )}
+                    {viewStudentState.isServerSideDecryption && (
+                      <p><span className="font-medium">Decryption Type:</span> Server-Side</p>
                     )}
                   </div>
                 </div>
@@ -1830,18 +3201,137 @@ const Dashboard = () => {
 
               {/* Security Info */}
               {viewStudentState.records.length > 0 && (
-                <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                <div className={`p-4 rounded-lg border ${
+                  viewStudentState.isServerSideDecryption 
+                    ? 'bg-purple-50 border-purple-200' 
+                    : 'bg-green-50 border-green-200'
+                }`}>
                   <div className="flex items-start space-x-2">
-                    <Shield className="h-5 w-5 text-green-600 mt-0.5" />
+                    <Shield className={`h-5 w-5 mt-0.5 ${
+                      viewStudentState.isServerSideDecryption ? 'text-purple-600' : 'text-green-600'
+                    }`} />
                     <div>
-                      <p className="text-green-800 font-medium">Secure Decryption Complete</p>
-                      <p className="text-green-600 text-sm">
-                        Student records were securely decrypted using your private RSA key and AES encryption.
+                      <p className={`font-medium ${
+                        viewStudentState.isServerSideDecryption ? 'text-purple-800' : 'text-green-800'
+                      }`}>
+                        {viewStudentState.isServerSideDecryption 
+                          ? 'Group-Based Decryption Complete' 
+                          : 'Secure Decryption Complete'}
+                      </p>
+                      <p className={`text-sm ${
+                        viewStudentState.isServerSideDecryption ? 'text-purple-600' : 'text-green-600'
+                      }`}>
+                        {viewStudentState.isServerSideDecryption 
+                          ? 'Student records were securely decrypted using Shamir Secret Sharing group consensus and server-side decryption. The required 3/3 faculty approvals were obtained to reconstruct the decryption keys.'
+                          : 'Student records were securely decrypted using your private RSA key and AES encryption on the client side.'
+                        }
                         {viewStudentState.decryptionStats.total > 0 && (
                           <span> Successfully processed {viewStudentState.decryptionStats.successful} out of {viewStudentState.decryptionStats.total} records.</span>
                         )}
                       </p>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Signature Status */}
+              {viewStudentState.records.length > 0 && (
+                <div className="mb-6">
+                  {(() => {
+                                         const signature = getSignatureForStudent(viewStudentState.nim);
+                     if (signature) {
+                       const verificationResult = verifySignature(signature, viewStudentState.records);
+                       const isVerified = verificationResult === true;
+                       const verificationFailed = verificationResult === false;
+                      
+                                             return (
+                         <div className={`p-4 rounded-lg border ${
+                           isVerified 
+                             ? 'bg-blue-50 border-blue-200' 
+                             : 'bg-red-50 border-red-200'
+                         }`}>
+                           <div className="flex items-start space-x-2">
+                             <div className="text-lg">
+                               {isVerified ? '✅' : '❌'}
+                             </div>
+                             <div className="flex-1">
+                               <p className={`font-medium ${
+                                 isVerified ? 'text-blue-800' : 'text-red-800'
+                               }`}>
+                                 Academic Records {isVerified ? 'Verified' : 'Verification Failed'} by Program Head
+                               </p>
+                               <p className={`text-sm ${
+                                 isVerified ? 'text-blue-600' : 'text-red-600'
+                               }`}>
+                                 {isVerified 
+                                   ? 'These academic records have been digitally signed and verified by the program head (Kaprodi).'
+                                   : 'Signature verification failed. The academic data may have been tampered with or the signature is invalid.'
+                                 }
+                               </p>
+                               {signature.signature && (
+                                 <div className="mt-2 p-2 bg-gray-100 rounded text-xs">
+                                   <p className="font-medium text-gray-700 mb-1">Digital Signature (SHA3):</p>
+                                   <p className="font-mono text-gray-600 break-all">{signature.signature}</p>
+                                 </div>
+                               )}
+                             </div>
+                           </div>
+                         </div>
+                       );
+                    } else {
+                      return (
+                        <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                          <div className="flex items-start space-x-2">
+                            <div className="text-lg">📝</div>
+                            <div className="flex-grow">
+                              <p className="text-gray-800 font-medium">Academic Records Unsigned</p>
+                              <p className="text-gray-600 text-sm mb-3">
+                                These academic records have not yet been digitally signed by the program head (Kaprodi).
+                              </p>
+                              {/* Sign Button for Kaprodi */}
+                              {userData?.type === 'kaprodi' && (
+                                <button
+                                  onClick={() => signStudentGrades(viewStudentState.nim, viewStudentState.records)}
+                                  disabled={isSigningGrades}
+                                  className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm"
+                                >
+                                  {isSigningGrades ? (
+                                    <>
+                                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                                      Signing...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <FileText className="h-4 w-4 mr-2" />
+                                      Sign Academic Records
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                  })()}
+                </div>
+              )}
+
+              {/* Download Transcript Button for View Student Records */}
+              {viewStudentState.records.length > 0 && (
+                <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-900">Generate Academic Transcript</h4>
+                      <p className="text-sm text-gray-600">Generate an official academic transcript PDF for {viewStudentState.studentName}</p>
+                    </div>
+                    <button
+                      onClick={() => handleOpenTranscriptModal(viewStudentState.nim, viewStudentState.studentName, viewStudentState.records)}
+                      className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      <FileText className="h-4 w-4" />
+                      <span>Generate Transcript</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -1954,6 +3444,261 @@ const Dashboard = () => {
     );
   };
 
+  const renderGroupBasedDecryption = () => {
+    console.log('[DEBUG] renderGroupBasedDecryption - All pending requests:', requestManagementState.pendingRequests);
+    console.log('[DEBUG] renderGroupBasedDecryption - All approved requests:', requestManagementState.approvedRequests);
+    console.log('[DEBUG] renderGroupBasedDecryption - Current user NIP:', userData.nim_nip);
+    
+    // Combine pending and approved requests for "My Requests" section
+    const myPendingRequests = requestManagementState.pendingRequests.filter(req => 
+      req.requester_nip === userData.nim_nip
+    );
+    
+    const myApprovedRequests = requestManagementState.approvedRequests.filter(req => 
+      req.requester_nip === userData.nim_nip
+    );
+    
+    // Combine and deduplicate (in case a request appears in both arrays during transition)
+    const allMyRequestsMap = new Map();
+    [...myPendingRequests, ...myApprovedRequests].forEach(req => {
+      const key = `${req.nim}-${req.requester_nip}`;
+      allMyRequestsMap.set(key, req);
+    });
+    const myRequests = Array.from(allMyRequestsMap.values());
+    
+    console.log('[DEBUG] renderGroupBasedDecryption - myPendingRequests:', myPendingRequests);
+    console.log('[DEBUG] renderGroupBasedDecryption - myApprovedRequests:', myApprovedRequests);
+    console.log('[DEBUG] renderGroupBasedDecryption - combined myRequests:', myRequests);
+    
+    const requestsToApprove = requestManagementState.pendingRequests.filter(req => 
+      req.requester_nip !== userData.nim_nip &&
+      !(req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+    );
+    
+    const myApprovedRequests2 = requestManagementState.pendingRequests.filter(req => 
+      req.requester_nip !== userData.nim_nip &&
+      (req.approvals || []).some(approval => approval.nip === userData.nim_nip && approval.approved)
+    );
+    
+    console.log('[DEBUG] renderGroupBasedDecryption - requestsToApprove:', requestsToApprove);
+    console.log('[DEBUG] renderGroupBasedDecryption - myApprovedRequests2:', myApprovedRequests2);
+
+    return (
+      <div className="space-y-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="card"
+        >
+          <h3 className="text-xl font-semibold text-gray-900 mb-6">Group Based Decryption Management</h3>
+          
+          {/* Info Section */}
+          <div className="bg-purple-50 p-4 rounded-lg border border-purple-200 mb-6">
+            <div className="flex items-start space-x-2">
+              <Users className="h-5 w-5 text-purple-600 mt-0.5" />
+              <div>
+                <p className="text-purple-800 font-medium">Shamir Secret Sharing Protocol</p>
+                <p className="text-purple-600 text-sm mt-1">
+                  This dashboard manages cross-program access requests using Shamir Secret Sharing. When a faculty member 
+                  requests access to a student's records outside their direct supervision, a minimum of 3 faculty approvals 
+                  are required to reconstruct the decryption key and grant access. The requester automatically provides the 
+                  first approval (1/3), and 2 additional colleague approvals are needed.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Statistics Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-4 rounded-lg">
+              <div className="text-2xl font-bold">{myRequests.length}</div>
+              <div className="text-sm opacity-90">My Requests</div>
+            </div>
+            <div className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-4 rounded-lg">
+              <div className="text-2xl font-bold">{requestsToApprove.length}</div>
+              <div className="text-sm opacity-90">Pending Approval</div>
+            </div>
+            <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-4 rounded-lg">
+              <div className="text-2xl font-bold">{myApprovedRequests2.length}</div>
+              <div className="text-sm opacity-90">I Approved</div>
+            </div>
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-4 rounded-lg">
+              <div className="text-2xl font-bold">{requestManagementState.pendingRequests.length + requestManagementState.approvedRequests.length}</div>
+              <div className="text-sm opacity-90">Total Active</div>
+            </div>
+          </div>
+
+          {/* My Requests Section */}
+          <div className="mb-8">
+            <h4 className="text-lg font-semibold text-gray-900 mb-4">My Access Requests</h4>
+            {myRequests.length === 0 ? (
+              <div className="text-center py-8 bg-gray-50 rounded-lg">
+                <Key className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                <p className="text-gray-600">No active requests</p>
+                <p className="text-sm text-gray-500">Requests you create will appear here</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {myRequests.map((request, index) => {
+                  const approvedCount = (request.approvals || []).filter(a => a.approved).length;
+                  const isApproved = request.status === 'approved' || approvedCount >= 3;
+                  
+                  return (
+                    <div key={index} className={`p-4 rounded-lg border ${
+                      isApproved ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
+                    }`}>
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-3 mb-2">
+                            <p className="font-semibold text-gray-900">Student NIM: {request.nim}</p>
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              isApproved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                            }`}>
+                              {isApproved ? 'Approved' : 'Pending'}
+                            </span>
+                          </div>
+                          <p className="text-sm text-gray-600 mb-2">
+                            Created: {new Date(request.created_at).toLocaleString()}
+                          </p>
+                          
+                          {/* Progress Bar */}
+                          <div className="mb-3">
+                            <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
+                              <span>Approval Progress</span>
+                              <span>{approvedCount} / 3</span>
+                            </div>
+                            <div className="w-full bg-gray-200 rounded-full h-2">
+                              <div 
+                                className={`h-2 rounded-full transition-all duration-300 ${
+                                  isApproved ? 'bg-green-600' : 'bg-yellow-600'
+                                }`}
+                                style={{ width: `${Math.min((approvedCount / 3) * 100, 100)}%` }}
+                              ></div>
+                            </div>
+                          </div>
+                          
+                          {/* Approval Details */}
+                          <div className="space-y-1 mb-3">
+                            {(request.approvals || []).map((approval, approvalIndex) => (
+                              <div key={approvalIndex} className="flex items-center justify-between text-xs">
+                                <span className="text-gray-600">Faculty NIP: {approval.nip}</span>
+                                <span className={`font-medium ${approval.approved ? 'text-green-600' : 'text-gray-400'}`}>
+                                  {approval.approved ? `✓ Approved (${new Date(approval.approved_at).toLocaleDateString()})` : '⏳ Pending'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        
+                        {/* Action Button for Approved Requests */}
+                        {isApproved && (
+                          <div className="ml-4">
+                            <button
+                              onClick={() => handleViewDecryptedRecords(request.nim, `Student ${request.nim}`)}
+                              className="flex items-center space-x-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm"
+                            >
+                              <FileText className="h-4 w-4" />
+                              <span>View Decrypted Records</span>
+                            </button>
+                            <p className="text-xs text-gray-500 mt-1 text-center">
+                              Use Shamir Secret Sharing
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Requests to Approve Section */}
+          <div className="mb-8">
+            <h4 className="text-lg font-semibold text-gray-900 mb-4">Requests Awaiting My Approval</h4>
+            {requestsToApprove.length === 0 ? (
+              <div className="text-center py-8 bg-gray-50 rounded-lg">
+                <CheckCircle className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                <p className="text-gray-600">No pending approvals</p>
+                <p className="text-sm text-gray-500">Requests from colleagues will appear here</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {requestsToApprove.map((request, index) => {
+                  const approvedCount = (request.approvals || []).filter(a => a.approved).length;
+                  
+                  return (
+                    <div key={index} className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-3 mb-2">
+                            <p className="font-semibold text-gray-900">Student NIM: {request.nim}</p>
+                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                              Needs Approval
+                            </span>
+                          </div>
+                          <p className="text-sm text-gray-600 mb-2">
+                            Requested by NIP: {request.requester_nip} • {new Date(request.created_at).toLocaleString()}
+                          </p>
+                          <p className="text-sm text-gray-500">
+                            Current approvals: {approvedCount} / 3
+                          </p>
+                        </div>
+                        <div className="flex space-x-2">
+                          <button
+                            onClick={() => handleApproveRequest(request.nim, request.requester_nip)}
+                            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                          >
+                            Approve
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Already Approved Section */}
+          {myApprovedRequests2.length > 0 && (
+            <div>
+              <h4 className="text-lg font-semibold text-gray-900 mb-4">Requests I've Approved</h4>
+              <div className="space-y-3">
+                {myApprovedRequests2.map((request, index) => {
+                  const approvedCount = (request.approvals || []).filter(a => a.approved).length;
+                  const myApproval = (request.approvals || []).find(a => a.nip === userData.nim_nip);
+                  
+                  return (
+                    <div key={index} className="p-4 bg-green-50 rounded-lg border border-green-200">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-3 mb-2">
+                            <p className="font-semibold text-gray-900">Student NIM: {request.nim}</p>
+                            <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs font-medium">
+                              ✓ Approved by me
+                            </span>
+                          </div>
+                          <p className="text-sm text-gray-600 mb-1">
+                            Requested by NIP: {request.requester_nip}
+                          </p>
+                          <p className="text-sm text-gray-500">
+                            I approved on: {new Date(myApproval.approved_at).toLocaleString()} • 
+                            Total approvals: {approvedCount} / 3
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </motion.div>
+      </div>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'overview':
@@ -1968,6 +3713,8 @@ const Dashboard = () => {
         return renderCourseManagement();
       case 'view-student':
         return renderViewStudentRecords();
+      case 'group-requests':
+        return renderGroupBasedDecryption();
       default:
         return renderOverview();
     }
@@ -2044,6 +3791,190 @@ const Dashboard = () => {
           </div>
         </div>
       </div>
+
+      {/* Transcript Generation Modal */}
+      {transcriptModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-lg p-6 w-full max-w-md"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-semibold text-gray-900">Generate Academic Transcript</h3>
+                             <button
+                 onClick={handleCloseTranscriptModal}
+                 disabled={isGeneratingTranscript || isLoadingTranscriptData}
+                 className="text-gray-500 hover:text-gray-700"
+               >
+                <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Loading Student Data */}
+            {isLoadingTranscriptData && (
+              <div className="bg-yellow-50 p-3 rounded-lg mb-4 border border-yellow-200">
+                <div className="flex items-center space-x-2">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600"></div>
+                  <p className="text-sm text-yellow-800">Loading student information...</p>
+                </div>
+              </div>
+            )}
+
+            {/* Student Info */}
+            {!isLoadingTranscriptData && (
+              <div className="bg-gray-50 p-3 rounded-lg mb-4">
+                <p className="text-sm"><span className="font-medium">Student:</span> {transcriptStudentName || 'Loading...'}</p>
+                <p className="text-sm"><span className="font-medium">NIM:</span> {transcriptNim || 'Loading...'}</p>
+                <p className="text-sm"><span className="font-medium">Records:</span> {transcriptStudentData?.length || 0} courses</p>
+              </div>
+            )}
+
+            {/* Encryption Options */}
+            <div className="space-y-4 mb-6">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="encryptTranscript"
+                  checked={transcriptEncrypted}
+                  onChange={(e) => setTranscriptEncrypted(e.target.checked)}
+                  disabled={isGeneratingTranscript}
+                  className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <label htmlFor="encryptTranscript" className="text-sm font-medium text-gray-700">
+                  Encrypt PDF with password
+                </label>
+              </div>
+
+              {transcriptEncrypted && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="ml-6"
+                >
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Encryption Password *
+                  </label>
+                  <input
+                    type="password"
+                    value={transcriptPassword}
+                    onChange={(e) => setTranscriptPassword(e.target.value)}
+                    disabled={isGeneratingTranscript}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    placeholder="Enter password for encryption"
+                    required
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    This password will be required to view the PDF
+                  </p>
+                </motion.div>
+              )}
+            </div>
+
+            {/* Loading Kaprodi Data */}
+            {isLoadingKaprodi && (
+              <div className="bg-yellow-50 p-3 rounded-lg mb-4 border border-yellow-200">
+                <div className="flex items-center space-x-2">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600"></div>
+                  <p className="text-sm text-yellow-800">Loading program head information...</p>
+                </div>
+              </div>
+            )}
+
+            {/* Generated URL */}
+            {generatedTranscriptUrl && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-green-50 p-4 rounded-lg mb-4 border border-green-200"
+              >
+                <div className="flex items-start space-x-2">
+                  <CheckCircle className="h-5 w-5 text-green-600 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-green-800 font-medium">Transcript Generated Successfully!</p>
+                    <p className="text-sm text-green-600 mb-3">
+                      {transcriptEncrypted 
+                        ? 'Your encrypted transcript is ready for download.' 
+                        : 'Your transcript is ready for download.'}
+                    </p>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => window.open(generatedTranscriptUrl, '_blank')}
+                        className="flex items-center space-x-2 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                      >
+                        <FileText className="h-4 w-4" />
+                        <span>Open PDF</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(generatedTranscriptUrl);
+                          toast.success('URL copied to clipboard!');
+                        }}
+                        className="flex items-center space-x-2 px-3 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm"
+                      >
+                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        <span>Copy URL</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex space-x-3">
+                             <button
+                 onClick={handleGenerateTranscript}
+                 disabled={isGeneratingTranscript || isLoadingKaprodi || isLoadingTranscriptData || (transcriptEncrypted && !transcriptPassword.trim())}
+                 className="flex-1 flex items-center justify-center space-x-2 px-4 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+               >
+                {isGeneratingTranscript ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                    <span>Generating...</span>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="h-4 w-4" />
+                    <span>Generate PDF</span>
+                  </>
+                )}
+              </button>
+              
+                             <button
+                 onClick={handleCloseTranscriptModal}
+                 disabled={isGeneratingTranscript || isLoadingTranscriptData}
+                 className="px-4 py-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+               >
+                 Close
+               </button>
+            </div>
+
+                         {/* Security Info */}
+             <div className="mt-4 bg-purple-50 p-3 rounded-lg border border-purple-200">
+               <div className="flex items-start space-x-2">
+                 <Shield className="h-4 w-4 text-purple-600 mt-0.5" />
+                 <div className="text-xs text-purple-800">
+                   <p className="font-medium">Security Features:</p>
+                   <ul className="list-disc list-inside mt-1 space-y-1">
+                     <li>SHA3 digital signature from program head included in PDF</li>
+                     <li>Tamper-proof LaTeX-generated PDF</li>
+                     {transcriptEncrypted && <li>RC4 encryption with your custom password</li>}
+                     <li>Official academic data with calculated GPA</li>
+                     <li>Cryptographic verification of data integrity</li>
+                   </ul>
+                 </div>
+               </div>
+             </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 };

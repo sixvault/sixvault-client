@@ -103,8 +103,6 @@ export const userApi = {
     });
   },
 
-
-
   // Access protected route (example)
   getProtectedData: async () => {
     return createFetchRequest('/protected', {
@@ -142,9 +140,110 @@ export const nilaiApi = {
     });
   },
 
+  // Decrypt all grades for a student using server-side decryption
+  decryptAllStudentGrades: async (nimNip) => {
+    try {
+      // First, get the list of encrypted records to get their IDs
+      const recordsResponse = await createFetchRequest(`/nilai/view/${nimNip}`, {
+        method: 'GET',
+      });
+
+      if (recordsResponse.status !== 'success' || !recordsResponse.data || !recordsResponse.data.records) {
+        throw new Error('No records found for this student');
+      }
+
+      const encryptedRecords = recordsResponse.data.records;
+      const decryptedRecords = [];
+      const errors = [];
+
+      // Decrypt each record using the server-side decrypt endpoint
+      for (const record of encryptedRecords) {
+        try {
+          const decryptedData = await createFetchRequest('/nilai/decrypt', {
+            method: 'POST',
+            body: JSON.stringify({ daftarNilaiId: record.id }),
+          });
+
+          if (decryptedData.status === 'success' && decryptedData.data) {
+            decryptedRecords.push({
+              id: record.id,
+              nim: decryptedData.data.nim,
+              kode: decryptedData.data.kode,
+              nama: decryptedData.data.nama,
+              nilai: decryptedData.data.nilai,
+              nip_dosen: record.nip_dosen,
+              // Add SKS if available in decrypted data or from original record
+              sks: decryptedData.data.sks || '0'
+            });
+          } else {
+            errors.push(`Failed to decrypt record ID ${record.id}: ${decryptedData.message || 'Unknown error'}`);
+          }
+        } catch (decryptError) {
+          console.error(`Error decrypting record ID ${record.id}:`, decryptError);
+          errors.push(`Error decrypting record ID ${record.id}: ${decryptError.message}`);
+        }
+      }
+
+      return {
+        status: 'success',
+        data: {
+          records: decryptedRecords,
+          count: decryptedRecords.length,
+          total: encryptedRecords.length,
+          errors: errors
+        }
+      };
+    } catch (error) {
+      console.error('Error in decryptAllStudentGrades:', error);
+      throw error;
+    }
+  },
+
   // Get student's encrypted grades by NIM/NIP
   getStudentGrades: async (nimNip) => {
     return createFetchRequest(`/nilai/view/${nimNip}`, {
+      method: 'GET',
+    });
+  },
+
+  // Request access to encrypted nilai data
+  requestAccess: async (nim, requesterNip) => {
+    return createFetchRequest('/nilai/request', {
+      method: 'POST',
+      body: JSON.stringify({ nim, requester_nip: requesterNip }),
+    });
+  },
+
+  // List all pending key requests
+  listPendingRequests: async () => {
+    return createFetchRequest('/nilai/request/list', {
+      method: 'GET',
+    });
+  },
+
+  // Approve a key request
+  approveRequest: async (nim, requesterNip, approverNip) => {
+    return createFetchRequest('/nilai/request/approve', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        nim, 
+        requester_nip: requesterNip, 
+        nip: approverNip 
+      }),
+    });
+  },
+
+  // Sign student grades (for kaprodi)
+  signGrades: async (nim, signature) => {
+    return createFetchRequest('/nilai/sign', {
+      method: 'POST',
+      body: JSON.stringify({ nim, signature }),
+    });
+  },
+
+  // List all signatures
+  listSignatures: async () => {
+    return createFetchRequest('/nilai/sign/list', {
       method: 'GET',
     });
   },
@@ -172,6 +271,40 @@ export const mataKuliahApi = {
     return createFetchRequest('/matakuliah/remove', {
       method: 'POST',
       body: JSON.stringify({ kodeList }),
+    });
+  },
+};
+
+// Kaprodi API
+export const kaprodiApi = {
+  // List all kaprodi users
+  listKaprodi: async () => {
+    return createFetchRequest('/kaprodi/list', {
+      method: 'GET',
+    });
+  },
+};
+
+// Transcript API
+export const transcriptApi = {
+  // Generate PDF from LaTeX and upload to Cloudflare R2
+  generateTranscript: async (nim, latex, encrypted = false, password = null) => {
+    const body = { nim, latex, encrypted };
+    if (encrypted && password) {
+      body.password = password;
+    }
+    
+    return createFetchRequest('/transcript/generate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  // Decrypt encrypted PDF from Cloudflare R2
+  decryptTranscript: async (nim, password) => {
+    return createFetchRequest('/transcript/decrypt', {
+      method: 'POST',
+      body: JSON.stringify({ nim, password }),
     });
   },
 };

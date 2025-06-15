@@ -1,4 +1,5 @@
 import { browserCrypto as crypto, Buffer } from './browserCrypto.js';
+import keccak from './SHA3Keccak.js';
 
 // Modular exponentiation: (base^exp) % mod
 function modPow(base, exp, mod) {
@@ -231,27 +232,29 @@ function decrypt(encryptedMessage, privateKeyBase64) {
 }
 
 // RSA Signing
-async function sign(message, privateKeyBase64) {
+function sign(message, privateKeyBase64) {
   const privateKey = JSON.parse(Buffer.from(privateKeyBase64, 'base64').toString());
   const d = bytesToLong(base64ToBytes(privateKey.d));
   const n = bytesToLong(base64ToBytes(privateKey.n));
-  const hasher = crypto.createHash('sha256');
-  hasher.update(message);
-  const messageHash = await hasher.digest();
+  const messageBuffer = Buffer.from(message, 'utf8');
+  const messageBytes = Array.from(messageBuffer.data);
+  const hashHex = keccak(messageBytes, 256);
+  const messageHash = Buffer.from(hashHex, 'hex');
   const messageBigInt = bytesToLong(messageHash);
   const signature = modPow(messageBigInt, d, n);
-  return bytesToBase64(longToBytes(signature));
+  return longToBytes(signature).toString('hex');
 }
 
 // RSA Verification
-async function verify(message, signature, publicKeyBase64) {
+function verify(message, signature, publicKeyBase64) {
   const publicKey = JSON.parse(Buffer.from(publicKeyBase64, 'base64').toString());
   const e = bytesToLong(base64ToBytes(publicKey.e));
   const n = bytesToLong(base64ToBytes(publicKey.n));
-  const hasher = crypto.createHash('sha256');
-  hasher.update(message);
-  const messageHash = await hasher.digest();
-  const signatureBigInt = bytesToLong(base64ToBytes(signature));
+  const messageBuffer = Buffer.from(message, 'utf8');
+  const messageBytes = Array.from(messageBuffer.data);
+  const hashHex = keccak(messageBytes, 256);
+  const messageHash = Buffer.from(hashHex, 'hex');
+  const signatureBigInt = bytesToLong(Buffer.from(signature, 'hex'));
   const decryptedSignature = modPow(signatureBigInt, e, n);
   return decryptedSignature === bytesToLong(messageHash);
 }

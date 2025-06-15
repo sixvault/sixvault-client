@@ -273,6 +273,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /kaprodi/list:
+    get:
+      summary: List all Kaprodi users
+      description: Retrieve all users with type 'kaprodi' from the database
+      tags:
+        - Kaprodi
+      responses:
+        '200':
+          description: Kaprodi users retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: List kaprodi fetched successfully
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 1
+                        nim_nip:
+                          type: string
+                          example: "197812312019031002"
+                        nama:
+                          type: string
+                          example: "Dr. Kaprodi Example"
+                        rsaPublicKey:
+                          type: string
+                          example: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA..."
+                        type:
+                          type: string
+                          example: kaprodi
+                        prodi:
+                          type: string
+                          example: teknik_informatika
+                        createdAt:
+                          type: string
+                          format: date-time
+                        updatedAt:
+                          type: string
+                          format: date-time
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Bad Request
   /protected:
     get:
       summary: Protected route
@@ -302,6 +364,143 @@ paths:
                         type: string
                       prodi:
                         type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nilai/request/approve:
+    post:
+      summary: Approve a key request
+      tags:
+        - Nilai
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - requester_nip
+                - nip
+              properties:
+                nim:
+                  type: string
+                  example: "231511001"
+                requester_nip:
+                  type: string
+                  example: "18222063"
+                nip:
+                  type: string
+                  example: "18222060"
+      responses:
+        '200':
+          description: Approval recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  approval:
+                    type: object
+        '400':
+          description: Bad request or already approved
+        '403':
+          description: Unauthorized access
+        '500':
+          description: Internal server error
+
+
+  /nilai/request/show:
+    get:
+      summary: Get all requests made by a requester
+      tags:
+        - Nilai
+      parameters:
+        - in: query
+          name: requester_nip
+          required: true
+          schema:
+            type: string
+            example: "18222063"
+      responses:
+        '200':
+          description: List of requests with approvals and decrypted data if available
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key_request_id:
+                      type: string
+                    daftar_nilai_id:
+                      type: string
+                      nullable: true
+                    status:
+                      type: string
+                    created_at:
+                      type: string
+                      format: date-time
+                    approvals_count:
+                      type: integer
+                    shares:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          teacher_nip:
+                            type: string
+                          approved:
+                            type: boolean
+                          approved_at:
+                            type: string
+                            format: date-time
+                    daftar_nilai:
+                      type: object
+                      nullable: true
+                      properties:
+                        decrypted_data:
+                          type: object
+                          nullable: true
+                          properties:
+                            nim:
+                              type: string
+                            kode:
+                              type: string
+                            nama:
+                              type: string
+                            nilai:
+                              type: string
+        '400':
+          description: Teacher hasn't made any request
+        '403':
+          description: Access denied (not enough approvals or not approved by dosen wali)
+        '500':
+          description: Internal server error
+
+  /nilai/request/list:
+    get:
+      tags:
+        - Nilai
+      summary: List all pending key requests
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of pending requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KeyRequestWithApprovals'
         '401':
           description: Unauthorized
           content:
@@ -448,9 +647,11 @@ paths:
   /matakuliah/add:
     post:
       summary: Add multiple Mata Kuliah entries
-      description: Add one or more Mata Kuliah entries to the database. Duplicates will be skipped. Each item must include `kode`, `nama`, `sks`, and `prodi`.
+      description: Add one or more Mata Kuliah entries to the database. Duplicates will be skipped. Each item must include `kode`, `nama`, and `sks`.
       tags:
         - MataKuliah
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -463,7 +664,6 @@ paths:
                   - kode
                   - nama
                   - sks
-                  - prodi
                 properties:
                   kode:
                     type: string
@@ -474,11 +674,6 @@ paths:
                   sks:
                     type: integer
                     example: 3
-                  prodi:
-                    type: string
-                    enum: [teknik_informatika, sistem_dan_teknologi_informasi]
-                    example: teknik_informatika
-                    description: Study program the course belongs to
       responses:
         '200':
           description: Mata Kuliah entries added successfully
@@ -505,7 +700,13 @@ paths:
                     example: error
                   message:
                     type: string
-                    example: Each matakuliah must have 'kode', 'nama', 'sks', and 'prodi'
+                    example: Each matakuliah must have 'kode', 'nama', and 'sks'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -514,17 +715,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /matakuliah/list:
     get:
-      summary: List Mata Kuliah entries
-      description: Retrieve Mata Kuliah entries from the database, optionally filtered by prodi
+      summary: List all Mata Kuliah entries
+      description: Retrieve all Mata Kuliah entries from the database
       tags:
         - MataKuliah
-      parameters:
-        - in: query
-          name: prodi
-          schema:
-            type: string
-            enum: [teknik_informatika, sistem_dan_teknologi_informasi]
-          description: Filter courses by study program (optional)
+      security:
+        - BearerAuth: []
       responses:
         '200':
           description: Mata Kuliah entries retrieved successfully
@@ -553,11 +749,12 @@ paths:
                         sks:
                           type: integer
                           example: 3
-                        prodi:
-                          type: string
-                          enum: [teknik_informatika, sistem_dan_teknologi_informasi]
-                          example: teknik_informatika
-                          description: Study program the course belongs to
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -644,6 +841,8 @@ paths:
       description: Delete Mata Kuliah records by a list of `kode` values.
       tags:
         - MataKuliah
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -685,6 +884,12 @@ paths:
                   message:
                     type: string
                     example: kodeList must be a non-empty array
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -806,8 +1011,579 @@ paths:
                     type: object
                     example: {}
 
+  /nilai/request:
+    post:
+      summary: Request access to encrypted nilai data
+      description: Create a request to access encrypted nilai data for a specific student. This starts the approval process where multiple dosen need to approve before the data can be decrypted.
+      tags:
+        - Nilai
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - requester_nip
+              properties:
+                nim:
+                  type: string
+                  example: "10222069"
+                  description: NIM of the student whose data is being requested
+                requester_nip:
+                  type: string
+                  example: "197812312019031002"
+                  description: NIP of the dosen making the request
+      responses:
+        '200':
+          description: Request created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                    example: 1
+                  nim:
+                    type: string
+                    example: "10222069"
+                  requester_nip:
+                    type: string
+                    example: "197812312019031002"
+                  status:
+                    type: string
+                    example: pending
+                  created_at:
+                    type: string
+                    format: date-time
+        '400':
+          description: Bad request or request already exists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Request already exists
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nilai/request/list:
+    get:
+      summary: List all pending key requests
+      description: Retrieve all pending key requests with their approval details and associated DaftarNilai information.
+      tags:
+        - Nilai
+      responses:
+        '200':
+          description: Pending requests retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                      example: 1
+                    nim:
+                      type: string
+                      example: "10222069"
+                    requester_nip:
+                      type: string
+                      example: "197812312019031002"
+                    status:
+                      type: string
+                      example: pending
+                    created_at:
+                      type: string
+                      format: date-time
+                    approvals:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: integer
+                          request_id:
+                            type: integer
+                          nim:
+                            type: string
+                          nip:
+                            type: string
+                          requester_nip:
+                            type: string
+                          approved:
+                            type: boolean
+                          approved_at:
+                            type: string
+                            format: date-time
+                    DaftarNilai:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        nim:
+                          type: string
+                        kode:
+                          type: string
+                          description: Encrypted course code
+                        nama:
+                          type: string
+                          description: Encrypted course name
+                        nilai:
+                          type: string
+                          description: Encrypted grade
+                        nip_dosen:
+                          type: string
+
+  /nilai/request/approve:
+    post:
+      summary: Approve a key request
+      description: Approve a key request by a dosen. When enough approvals (threshold of 3) are collected, the request status is updated to approved.
+      tags:
+        - Nilai
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - requester_nip
+                - nip
+              properties:
+                nim:
+                  type: string
+                  example: "10222069"
+                  description: NIM of the student
+                requester_nip:
+                  type: string
+                  example: "197812312019031002"
+                  description: NIP of the dosen who made the original request
+                nip:
+                  type: string
+                  example: "197812312019031003"
+                  description: NIP of the dosen giving approval
+      responses:
+        '200':
+          description: Approval recorded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Approval recorded
+                  approval:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      request_id:
+                        type: integer
+                      nim:
+                        type: string
+                      nip:
+                        type: string
+                      requester_nip:
+                        type: string
+                      approved:
+                        type: boolean
+                        example: true
+                      approved_at:
+                        type: string
+                        format: date-time
+        '400':
+          description: Bad request - user not found, request not found, or already approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Request Not Found
+                  error:
+                    type: string
+                    example: Already approved by this teacher
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Internal server error
+
+  /nilai/sign:
+    post:
+      summary: Sign nilai data
+      description: Create or update a digital signature for nilai data using student NIM and signature. Each NIM can only have one signature (unique constraint). The kaprodi's public key is automatically included in the signature record.
+      tags:
+        - Nilai
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - signature
+              properties:
+                nim:
+                  type: string
+                  example: "10222069"
+                  description: NIM of the student (unique)
+                signature:
+                  type: string
+                  example: "digital_signature_string"
+                  description: Digital signature for the nilai data
+      responses:
+        '200':
+          description: Signature created or updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Signature created successfully
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                        example: 1
+                      nim:
+                        type: string
+                        example: "10222069"
+                      signature:
+                        type: string
+                        example: "digital_signature_string"
+                      kaprodiPublicKey:
+                        type: string
+                        example: "eyJlIjoiQVFBQiIsIm4iOiJqR0hzc3ExSDlUNGg1WTlZa..."
+                        description: RSA public key of the kaprodi who signed the nilai
+                      created_at:
+                        type: string
+                        format: date-time
+                      updated_at:
+                        type: string
+                        format: date-time
+        '400':
+          description: Bad request - missing nim or signature
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Both "nim" and "signature" are required
+                  data:
+                    type: object
+                    example: {}
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nilai/sign/list:
+    get:
+      summary: List all nilai signatures
+      description: Retrieve all digital signatures for nilai data. Each NIM has a unique signature that includes the kaprodi's public key for verification purposes.
+      tags:
+        - Nilai
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of signatures retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Signatures retrieved successfully
+                  data:
+                    type: array
+                    items:
+                      type: object
+                                              properties:
+                          id:
+                            type: integer
+                            example: 1
+                          nim:
+                            type: string
+                            example: "10222069"
+                          signature:
+                            type: string
+                            example: "digital_signature_string"
+                          kaprodiPublicKey:
+                            type: string
+                            example: "eyJlIjoiQVFBQiIsIm4iOiJqR0hzc3ExSDlUNGg1WTlZa..."
+                            description: RSA public key of the kaprodi who signed the nilai
+                          created_at:
+                            type: string
+                            format: date-time
+                          updated_at:
+                            type: string
+                            format: date-time
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /transcript/generate:
+    post:
+      summary: Generate PDF from LaTeX and upload to Cloudflare R2
+      description: Generate a PDF document from LaTeX syntax and upload to Cloudflare R2 storage. Optionally encrypt the PDF using RC4 encryption with the provided password.
+      tags:
+        - Transcript
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - latex
+              properties:
+                nim:
+                  type: string
+                  example: "10222069"
+                  description: Student NIM for file identification
+                latex:
+                  type: string
+                  example: "\\documentclass{article}\\begin{document}Hello World!\\end{document}"
+                  description: LaTeX document content
+                encrypted:
+                  type: boolean
+                  example: false
+                  description: Whether to encrypt the generated PDF
+                password:
+                  type: string
+                  example: "mypassword123"
+                  description: Password for encryption (required if encrypted is true)
+      responses:
+        '200':
+          description: PDF generated and uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: PDF generated and uploaded successfully
+                  data:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        example: "https://cdn.sixvault.xyz/transcript/10222069.pdf"
+                        description: Public URL of the uploaded PDF
+                      nim:
+                        type: string
+                        example: "10222069"
+                      encrypted:
+                        type: boolean
+                        example: false
+        '400':
+          description: Bad request - missing required fields or invalid parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: NIM is required
+
+  /transcript/decrypt:
+    post:
+      summary: Decrypt encrypted PDF from Cloudflare R2
+      description: Download an encrypted PDF from R2, decrypt it using RC4 decryption with the provided password, and upload the decrypted version to the transcript folder.
+      tags:
+        - Transcript
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - nim
+                - password
+              properties:
+                nim:
+                  type: string
+                  example: "10222069"
+                  description: Student NIM to identify the encrypted PDF file
+                password:
+                  type: string
+                  example: "mypassword123"
+                  description: Password used for decryption
+      responses:
+        '200':
+          description: PDF decrypted and uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: PDF decrypted and uploaded successfully
+                  data:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        example: "https://cdn.sixvault.xyz/transcript/10222069.pdf"
+                        description: Public URL of the decrypted PDF
+                      nim:
+                        type: string
+                        example: "10222069"
+        '400':
+          description: Bad request - missing NIM, password, or decryption failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: NIM is required
+        '404':
+          description: Encrypted PDF not found for the specified NIM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: Encrypted PDF not found for this NIM
+
 components:
   schemas:
+    Approval:
+      type: object
+      properties:
+        id:
+          type: integer
+        request_id:
+          type: integer
+        nim:
+          type: string
+        nip:
+          type: string
+        requester_nip:
+          type: string
+        approved:
+          type: boolean
+        approved_at:
+          type: string
+          format: date-time
+
+    KeyRequest:
+      type: object
+      properties:
+        id:
+          type: integer
+        nim:
+          type: string
+        requester_nip:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    KeyRequestWithApprovals:
+      allOf:
+        - $ref: '#/components/schemas/KeyRequest'
+        - type: object
+          properties:
+            approvals:
+              type: array
+              items:
+                $ref: '#/components/schemas/Approval'
     ErrorResponse:
       type: object
       properties:
