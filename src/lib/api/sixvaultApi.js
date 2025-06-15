@@ -103,6 +103,8 @@ export const userApi = {
     });
   },
 
+
+
   // Access protected route (example)
   getProtectedData: async () => {
     return createFetchRequest('/protected', {
@@ -140,9 +142,9 @@ export const nilaiApi = {
     });
   },
 
-  // Get student's own encrypted grades (for mahasiswa)  
-  getStudentGrades: async () => {
-    return createFetchRequest('/nilai/view', {
+  // Get student's encrypted grades by NIM/NIP
+  getStudentGrades: async (nimNip) => {
+    return createFetchRequest(`/nilai/view/${nimNip}`, {
       method: 'GET',
     });
   },
@@ -150,7 +152,7 @@ export const nilaiApi = {
 
 // Courses (Mata Kuliah) API
 export const mataKuliahApi = {
-  // List all courses
+  // List courses (backend will filter based on JWT user data)
   listCourses: async () => {
     return createFetchRequest('/matakuliah/list', {
       method: 'GET',

@@ -18,7 +18,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { mataKuliahApi, nilaiApi } from '../lib/api/sixvaultApi';
+import { mataKuliahApi, nilaiApi, studentApi } from '../lib/api/sixvaultApi';
 import { decrypt as rsaDecrypt } from '../lib/crypto/RSA';
 import AES from '../lib/crypto/AES';
 import { toast } from 'react-toastify';
@@ -59,6 +59,18 @@ const Dashboard = () => {
   const [gradesError, setGradesError] = useState('');
   const [decryptionStats, setDecryptionStats] = useState({ total: 0, successful: 0, failed: 0 });
   
+  // View student records state (for kaprodi and dosen_wali)
+  const [viewStudentState, setViewStudentState] = useState({
+    nim: '',
+    studentName: '',
+    records: [],
+    isLoading: false,
+    isDecrypting: false,
+    error: '',
+    decryptionStats: { total: 0, successful: 0, failed: 0 },
+    hasSearched: false
+  });
+  
   // Autocomplete state for academic data form
   const [courseSuggestions, setCourseSuggestions] = useState({});
   const [showSuggestions, setShowSuggestions] = useState({});
@@ -88,49 +100,23 @@ const Dashboard = () => {
         console.log('Starting to fetch available courses...');
         setIsLoadingAvailableCourses(true);
         
-        // Check if we have access token
-        const accessToken = localStorage.getItem('access_token');
-        console.log('Access token exists:', !!accessToken);
+        // Backend will filter courses based on JWT user data
+        const response = await mataKuliahApi.listCourses();
         
-        if (!accessToken) {
-          throw new Error('No access token found');
-        }
-        
-        const apiUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/matakuliah/list`;
-        console.log('API URL:', apiUrl);
-        
-        const response = await fetch(apiUrl, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-        });
-
-        console.log('Response status:', response.status);
-        console.log('Response ok:', response.ok);
-
-        if (response.ok) {
-          const result = await response.json();
-          console.log('API Response:', result);
+        if (response.status === 'success' && Array.isArray(response.data)) {
+          // Transform API response to match our expected format
+          const transformedCourses = response.data.map(course => ({
+            kode: course.kode,
+            nama: course.matakuliah, // API uses "matakuliah" field
+            sks: course.sks.toString(), // Ensure SKS is string for consistency
+            prodi: course.prodi // Include prodi field
+          }));
           
-          if (result.status === 'success' && Array.isArray(result.data)) {
-            // Transform API response to match our expected format
-            const transformedCourses = result.data.map(course => ({
-              kode: course.kode,
-              nama: course.matakuliah, // API uses "matakuliah" field
-              sks: course.sks.toString() // Ensure SKS is string for consistency
-            }));
-            console.log('Transformed courses:', transformedCourses.length);
-            setAvailableCourses(transformedCourses);
-          } else {
-            console.error('Invalid API response format:', result);
-            toast.error('Failed to load available courses - Invalid response format');
-          }
+          console.log('Transformed courses:', transformedCourses.length);
+          setAvailableCourses(transformedCourses);
         } else {
-          const errorText = await response.text();
-          console.error('API Error:', response.status, errorText);
-          throw new Error(`API returned ${response.status}: ${errorText}`);
+          console.error('Invalid API response format:', response);
+          toast.error('Failed to load available courses - Invalid response format');
         }
       } catch (error) {
         console.error('Error fetching available courses:', error);
@@ -140,8 +126,8 @@ const Dashboard = () => {
       }
     };
 
-    // Fetch for dosen_wali and mahasiswa (mahasiswa needs it for SKS lookup)
-    if (userData?.type === 'dosen_wali' || userData?.type === 'mahasiswa') {
+    // Fetch for dosen_wali, mahasiswa, and kaprodi (all need it for SKS lookup)
+    if (userData?.type === 'dosen_wali' || userData?.type === 'mahasiswa' || userData?.type === 'kaprodi') {
       fetchAvailableCourses();
     } else {
       setIsLoadingAvailableCourses(false);
@@ -153,7 +139,7 @@ const Dashboard = () => {
     if (userData?.type === 'kaprodi' && activeTab === 'courses') {
       loadExistingCourses();
     }
-  }, [userData, activeTab]);
+  }, [userData?.type, activeTab]);
 
   // Load student grades when mahasiswa accesses grades tab
   useEffect(() => {
@@ -447,11 +433,220 @@ const Dashboard = () => {
     }
   };
 
+  // View student records functions (for kaprodi and dosen_wali)
+  const handleViewStudentSearch = async () => {
+    if (!viewStudentState.nim.trim()) {
+      toast.error('Please enter a valid NIM');
+      return;
+    }
+
+    setViewStudentState(prev => ({
+      ...prev,
+      isLoading: true,
+      isDecrypting: false,
+      error: '',
+      records: [],
+      studentName: '',
+      decryptionStats: { total: 0, successful: 0, failed: 0 },
+      hasSearched: false
+    }));
+
+    try {
+      // First, search for the student to get their name
+      const studentSearchResponse = await studentApi.searchStudent(viewStudentState.nim.trim());
+      const studentName = studentSearchResponse.data?.nama || 'Unknown Student';
+
+      // Then, get their grade records
+      const response = await nilaiApi.getStudentGrades(viewStudentState.nim.trim());
+      
+      if (response.status === 'success' && response.data) {
+        const encryptedRecords = response.data.records || [];
+        
+        setViewStudentState(prev => ({
+          ...prev,
+          studentName,
+          hasSearched: true,
+          isLoading: false
+        }));
+
+        if (encryptedRecords.length === 0) {
+          setViewStudentState(prev => ({
+            ...prev,
+            error: 'No grade records found for this student.',
+            records: []
+          }));
+          return;
+        }
+
+        // Get user's private key for RSA decryption
+        const privateKey = localStorage.getItem('rsa_private_key');
+        if (!privateKey) {
+          throw new Error('Private key not found. Please login again.');
+        }
+
+        // Start decryption process
+        setViewStudentState(prev => ({
+          ...prev,
+          isDecrypting: true
+        }));
+        
+        const decryptedRecords = [];
+        let successful = 0;
+        let failed = 0;
+        const total = encryptedRecords.length;
+
+        // Decrypt each grade record
+        for (const record of encryptedRecords) {
+          try {
+            // Step 1: Decrypt the AES key using RSA private key
+            console.log('[DEBUG] Decrypting record for student:', viewStudentState.nim);
+            const decryptedAESKey = rsaDecrypt(record.rsa_encrypted_aes_key, privateKey);
+            
+            // Step 2: Initialize AES with the decrypted key
+            const aes = new AES();
+            const decryptedKode = aes.decrypt(record.encrypted_data.kode, decryptedAESKey);
+            const decryptedNama = aes.decrypt(record.encrypted_data.nama, decryptedAESKey);
+            const decryptedNilai = aes.decrypt(record.encrypted_data.nilai, decryptedAESKey);
+            
+            // Step 3: Get SKS from encrypted data or available courses
+            let sks = '0';
+            if (record.encrypted_data.sks) {
+              try {
+                sks = aes.decrypt(record.encrypted_data.sks, decryptedAESKey);
+                console.log('[DEBUG] SKS decrypted from encrypted data:', sks);
+              } catch (sksError) {
+                console.warn('[DEBUG] Failed to decrypt SKS, falling back to course lookup');
+                // Fall back to course lookup if decryption fails
+                const matchingCourse = availableCourses.find(course => 
+                  course.kode === decryptedKode
+                );
+                if (matchingCourse) {
+                  sks = matchingCourse.sks;
+                  console.log('[DEBUG] SKS found in available courses:', sks);
+                }
+              }
+            } else {
+              // Try to get SKS from available courses
+              console.log('[DEBUG] No encrypted SKS data, looking up in available courses for:', decryptedKode);
+              const matchingCourse = availableCourses.find(course => 
+                course.kode === decryptedKode
+              );
+              if (matchingCourse) {
+                sks = matchingCourse.sks;
+                console.log('[DEBUG] SKS found in available courses:', sks);
+              } else {
+                console.warn('[DEBUG] Course not found in available courses. Total courses available:', availableCourses.length);
+              }
+            }
+
+            decryptedRecords.push({
+              id: record.id,
+              kode: decryptedKode,
+              nama: decryptedNama,
+              nilai: decryptedNilai,
+              sks: sks,
+              nip_dosen: record.nip_dosen
+            });
+            
+            successful++;
+          } catch (decryptError) {
+            console.error('Error decrypting record:', decryptError);
+            failed++;
+          }
+          
+          // Update decryption progress
+          setViewStudentState(prev => ({
+            ...prev,
+            decryptionStats: { total, successful, failed }
+          }));
+        }
+
+        setViewStudentState(prev => ({
+          ...prev,
+          records: decryptedRecords,
+          isDecrypting: false
+        }));
+        
+        // Show final results
+        if (successful > 0) {
+          toast.success(`Successfully decrypted ${successful} out of ${total} grade records.`);
+        }
+        
+        if (failed > 0) {
+          toast.warning(`Failed to decrypt ${failed} out of ${total} grade records.`);
+        }
+        
+        if (decryptedRecords.length === 0 && encryptedRecords.length > 0) {
+          setViewStudentState(prev => ({
+            ...prev,
+            error: 'Failed to decrypt all grade records. You may not have access to this student\'s records.'
+          }));
+        }
+      } else {
+        setViewStudentState(prev => ({
+          ...prev,
+          error: response.message || 'No grades found for this student',
+          records: [],
+          hasSearched: true
+        }));
+      }
+    } catch (error) {
+      console.error('Error loading student records:', error);
+      let errorMessage = `Error loading student records: ${error.message}`;
+      
+      // Handle specific error cases
+      if (error.message.includes('403') || error.message.includes('Unauthorized')) {
+        errorMessage = 'You do not have permission to view this student\'s records.';
+      } else if (error.message.includes('404')) {
+        errorMessage = 'Student not found or no records available.';
+      }
+      
+      setViewStudentState(prev => ({
+        ...prev,
+        error: errorMessage,
+        records: [],
+        hasSearched: true
+      }));
+    } finally {
+      setViewStudentState(prev => ({
+        ...prev,
+        isLoading: false,
+        isDecrypting: false
+      }));
+    }
+  };
+
+  const handleViewStudentNimChange = (value) => {
+    setViewStudentState(prev => ({
+      ...prev,
+      nim: value,
+      error: '',
+      records: [],
+      studentName: '',
+      hasSearched: false,
+      decryptionStats: { total: 0, successful: 0, failed: 0 }
+    }));
+  };
+
+  const clearViewStudentData = () => {
+    setViewStudentState({
+      nim: '',
+      studentName: '',
+      records: [],
+      isLoading: false,
+      isDecrypting: false,
+      error: '',
+      decryptionStats: { total: 0, successful: 0, failed: 0 },
+      hasSearched: false
+    });
+  };
+
   // Course management functions
   const loadExistingCourses = async () => {
     if (userData?.type !== 'kaprodi') return;
     setIsLoadingCourses(true);
     try {
+      // Backend will filter courses based on JWT user data
       const response = await mataKuliahApi.listCourses();
       if (response.status === 'success') {
         setExistingCourses(response.data);
@@ -474,7 +669,8 @@ const Dashboard = () => {
       const coursesToAdd = predefinedCourses[userData.prodi].map(course => ({
         kode: course.kode,
         matakuliah: course.nama,
-        sks: parseInt(course.sks)
+        sks: parseInt(course.sks),
+        prodi: userData.prodi
       }));
       const response = await mataKuliahApi.addCourses(coursesToAdd);
       if (response.status === 'success') {
@@ -564,7 +760,7 @@ const Dashboard = () => {
     setDecryptionStats({ total: 0, successful: 0, failed: 0 });
     
     try {
-      const response = await nilaiApi.getStudentGrades();
+      const response = await nilaiApi.getStudentGrades(userData.nim_nip);
       if (response.status === 'success' && response.data) {
         const encryptedRecords = response.data.records || [];
         const decryptedGrades = [];
@@ -691,8 +887,14 @@ const Dashboard = () => {
     { id: 'overview', label: 'Overview', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
     ...(userData?.type === 'mahasiswa' ? [{ id: 'grades', label: 'My Grades', icon: BookOpen }] : []),
-    ...(userData?.type === 'dosen_wali' ? [{ id: 'academic', label: 'Academic Data', icon: GraduationCap }] : []),
-    ...(userData?.type === 'kaprodi' ? [{ id: 'courses', label: 'Course Management', icon: Settings }] : []),
+    ...(userData?.type === 'dosen_wali' ? [
+      { id: 'academic', label: 'Academic Data', icon: GraduationCap },
+      { id: 'view-student', label: 'View Student Records', icon: FileText }
+    ] : []),
+    ...(userData?.type === 'kaprodi' ? [
+      { id: 'courses', label: 'Course Management', icon: Settings },
+      { id: 'view-student', label: 'View Student Records', icon: FileText }
+    ] : []),
   ];
 
   const cryptoFeatures = [
@@ -816,6 +1018,19 @@ const Dashboard = () => {
           className="card"
         >
           <h3 className="text-xl font-semibold text-gray-900 mb-6">Input Academic Data</h3>
+          
+          {/* Info note for dosen_wali */}
+          <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+            <div className="flex items-start space-x-2">
+              <Shield className="h-5 w-5 text-blue-600 mt-0.5" />
+              <div className="text-sm text-blue-800">
+                <p className="font-medium mb-1">Academic Advisor Access</p>
+                <p>
+                  As a Dosen Wali, you can input academic data for students assigned to you. The system will automatically create secure keys for the student, yourself, and the program head (Kaprodi) to ensure proper access control.
+                </p>
+              </div>
+            </div>
+          </div>
           
           {/* Student Information */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -1435,6 +1650,310 @@ const Dashboard = () => {
     );
   };
 
+  const renderViewStudentRecords = () => {
+    // Calculate GPA for the viewed student
+    const calculateStudentGPA = () => {
+      if (viewStudentState.records.length === 0) return 0;
+      
+      console.log('[DEBUG] Calculating GPA for records:', viewStudentState.records);
+      
+      const validGrades = viewStudentState.records.filter(grade => 
+        grade.nilai && grade.sks && gradePoints[grade.nilai]
+      );
+      
+      console.log('[DEBUG] Valid grades for GPA calculation:', validGrades);
+      console.log('[DEBUG] Filtered out records:', viewStudentState.records.filter(grade => 
+        !grade.nilai || !grade.sks || !gradePoints[grade.nilai]
+      ));
+      
+      if (validGrades.length === 0) return 0;
+      
+      const totalPoints = validGrades.reduce((sum, grade) => {
+        const points = gradePoints[grade.nilai] * parseInt(grade.sks || 0);
+        console.log('[DEBUG] Grade:', grade.nilai, 'SKS:', grade.sks, 'Points:', points);
+        return sum + points;
+      }, 0);
+      
+      const totalSks = validGrades.reduce((sum, grade) => {
+        return sum + parseInt(grade.sks || 0);
+      }, 0);
+      
+      console.log('[DEBUG] Total points:', totalPoints, 'Total SKS:', totalSks);
+      
+      return totalSks > 0 ? totalPoints / totalSks : 0;
+    };
+
+    const studentGPA = calculateStudentGPA();
+    const totalSks = viewStudentState.records.reduce((sum, grade) => sum + parseInt(grade.sks || 0), 0);
+    const userTypeLabel = userData?.type === 'kaprodi' ? 'Program Head' : 'Academic Advisor';
+
+    return (
+      <div className="space-y-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="card"
+        >
+          <h3 className="text-xl font-semibold text-gray-900 mb-6">View Student Academic Records</h3>
+          
+          {/* Info note */}
+          <div className="bg-blue-50 p-4 rounded-lg border border-blue-200 mb-6">
+            <div className="flex items-start space-x-2">
+              <Shield className="h-5 w-5 text-blue-600 mt-0.5" />
+              <div className="text-sm text-blue-800">
+                <p className="font-medium mb-1">{userTypeLabel} Access</p>
+                <p>
+                  {userData?.type === 'kaprodi' 
+                    ? `As a Program Head, you can view academic records for students in the ${userData?.prodi === 'teknik_informatika' ? 'Teknik Informatika' : 'Sistem dan Teknologi Informasi'} program.`
+                    : 'As an Academic Advisor, you can view academic records for students assigned to you as their dosen wali.'
+                  }
+                </p>
+              </div>
+            </div>
+          </div>
+          
+          {/* Search Form */}
+          <div className="bg-gray-50 p-4 rounded-lg mb-6">
+            <h4 className="text-lg font-medium text-gray-900 mb-4">Search Student Records</h4>
+            <div className="flex space-x-4">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Student NIM
+                </label>
+                <input
+                  type="text"
+                  value={viewStudentState.nim}
+                  onChange={(e) => handleViewStudentNimChange(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleViewStudentSearch()}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  placeholder="Enter student NIM (e.g., 13520001)"
+                  disabled={viewStudentState.isLoading || viewStudentState.isDecrypting}
+                />
+              </div>
+              <div className="flex items-end space-x-2">
+                <button
+                  onClick={handleViewStudentSearch}
+                  disabled={viewStudentState.isLoading || viewStudentState.isDecrypting || !viewStudentState.nim.trim()}
+                  className="px-6 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center space-x-2"
+                >
+                  {viewStudentState.isLoading && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>}
+                  <span>{viewStudentState.isLoading ? 'Searching...' : 'Search'}</span>
+                </button>
+                <button
+                  onClick={clearViewStudentData}
+                  disabled={viewStudentState.isLoading || viewStudentState.isDecrypting}
+                  className="px-4 py-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Loading State */}
+          {viewStudentState.isLoading && (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto mb-4"></div>
+              <p className="text-gray-600">Loading student records...</p>
+            </div>
+          )}
+
+          {/* Decryption State */}
+          {viewStudentState.isDecrypting && (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto mb-4"></div>
+              <p className="text-gray-600 mb-2">Decrypting student records...</p>
+              {viewStudentState.decryptionStats.total > 0 && (
+                <div className="text-sm text-gray-500">
+                  <p>Progress: {viewStudentState.decryptionStats.successful + viewStudentState.decryptionStats.failed} / {viewStudentState.decryptionStats.total}</p>
+                  <div className="w-full bg-gray-200 rounded-full h-2 mt-2 max-w-xs mx-auto">
+                    <div 
+                      className="bg-green-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${((viewStudentState.decryptionStats.successful + viewStudentState.decryptionStats.failed) / viewStudentState.decryptionStats.total) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Error State */}
+          {viewStudentState.error && viewStudentState.hasSearched && (
+            <div className="bg-red-50 p-4 rounded-lg border border-red-200 mb-6">
+              <div className="flex items-center space-x-2">
+                <AlertCircle className="h-5 w-5 text-red-600" />
+                <div>
+                  <p className="text-red-800 font-medium">Error</p>
+                  <p className="text-red-600 text-sm">{viewStudentState.error}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Student Info and Results */}
+          {!viewStudentState.isLoading && !viewStudentState.isDecrypting && viewStudentState.hasSearched && viewStudentState.studentName && !viewStudentState.error && (
+            <div className="space-y-6">
+              {/* Student Header */}
+              <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                <h4 className="text-lg font-semibold text-gray-900 mb-2">Student Information</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p><span className="font-medium">NIM:</span> {viewStudentState.nim}</p>
+                    <p><span className="font-medium">Name:</span> {viewStudentState.studentName}</p>
+                  </div>
+                  <div>
+                    <p><span className="font-medium">Total Records:</span> {viewStudentState.records.length}</p>
+                    {viewStudentState.decryptionStats.total > 0 && (
+                      <p><span className="font-medium">Decryption Success:</span> {viewStudentState.decryptionStats.successful} / {viewStudentState.decryptionStats.total}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Academic Summary */}
+              {viewStudentState.records.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-gradient-to-r from-blue-500 to-blue-600 text-white p-4 rounded-lg">
+                    <div className="text-2xl font-bold">{studentGPA.toFixed(2)}</div>
+                    <div className="text-sm opacity-90">Grade Point Average</div>
+                  </div>
+                  <div className="bg-gradient-to-r from-green-500 to-green-600 text-white p-4 rounded-lg">
+                    <div className="text-2xl font-bold">{viewStudentState.records.length}</div>
+                    <div className="text-sm opacity-90">Total Courses</div>
+                  </div>
+                  <div className="bg-gradient-to-r from-purple-500 to-purple-600 text-white p-4 rounded-lg">
+                    <div className="text-2xl font-bold">{totalSks}</div>
+                    <div className="text-sm opacity-90">Total Credits (SKS)</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Security Info */}
+              {viewStudentState.records.length > 0 && (
+                <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                  <div className="flex items-start space-x-2">
+                    <Shield className="h-5 w-5 text-green-600 mt-0.5" />
+                    <div>
+                      <p className="text-green-800 font-medium">Secure Decryption Complete</p>
+                      <p className="text-green-600 text-sm">
+                        Student records were securely decrypted using your private RSA key and AES encryption.
+                        {viewStudentState.decryptionStats.total > 0 && (
+                          <span> Successfully processed {viewStudentState.decryptionStats.successful} out of {viewStudentState.decryptionStats.total} records.</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Records Table */}
+              {viewStudentState.records.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse border border-gray-300">
+                    <thead>
+                      <tr className="bg-gray-50">
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">No</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Course Code</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Course Name</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Credits</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Grade</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Points</th>
+                        <th className="border border-gray-300 px-4 py-3 text-left text-sm font-medium text-gray-700">Lecturer NIP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewStudentState.records.map((grade, index) => (
+                        <tr key={index} className="hover:bg-gray-50">
+                          <td className="border border-gray-300 px-4 py-3 text-sm">{index + 1}</td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm font-mono">{grade.kode}</td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm">{grade.nama}</td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm text-center">{grade.sks}</td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm text-center">
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              grade.nilai === 'A' ? 'bg-green-100 text-green-800' :
+                              grade.nilai === 'AB' ? 'bg-blue-100 text-blue-800' :
+                              grade.nilai === 'B' ? 'bg-indigo-100 text-indigo-800' :
+                              grade.nilai === 'BC' ? 'bg-purple-100 text-purple-800' :
+                              grade.nilai === 'C' ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-red-100 text-red-800'
+                            }`}>
+                              {grade.nilai}
+                            </span>
+                          </td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm text-center">
+                            {gradePoints[grade.nilai] ? gradePoints[grade.nilai].toFixed(1) : '-'}
+                          </td>
+                          <td className="border border-gray-300 px-4 py-3 text-sm font-mono">{grade.nip_dosen}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Empty Records State */}
+              {viewStudentState.records.length === 0 && viewStudentState.hasSearched && !viewStudentState.error && (
+                <div className="text-center py-8">
+                  <BookOpen className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                  <p className="text-gray-600 mb-2">No academic records found</p>
+                  <p className="text-sm text-gray-500">This student doesn't have any recorded grades yet.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </motion.div>
+
+        {/* Additional Information Cards */}
+        {!viewStudentState.isLoading && !viewStudentState.isDecrypting && viewStudentState.records.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0, transition: { delay: 0.1 } }}
+            className="grid grid-cols-1 lg:grid-cols-2 gap-6"
+          >
+            <div className="card">
+              <h4 className="text-lg font-semibold text-gray-900 mb-4">Grade Scale</h4>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {Object.entries(gradePoints).map(([grade, points]) => (
+                  <div key={grade} className="text-center p-3 bg-gray-50 rounded-lg">
+                    <div className="text-lg font-bold text-gray-900">{grade}</div>
+                    <div className="text-sm text-gray-600">{points.toFixed(1)} points</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <h4 className="text-lg font-semibold text-gray-900 mb-4">Access Control Information</h4>
+              <div className="space-y-3 text-sm text-gray-600">
+                <div className="flex items-start space-x-2">
+                  <Users className="h-4 w-4 text-blue-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-gray-900">Role-Based Access</p>
+                    <p>Only authorized staff can view student records based on their role and assignment.</p>
+                  </div>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <Key className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-gray-900">Cryptographic Security</p>
+                    <p>All academic data is encrypted and requires proper decryption keys for access.</p>
+                  </div>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <Shield className="h-4 w-4 text-purple-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-gray-900">Privacy Protection</p>
+                    <p>Student data is protected through multi-layer encryption and access controls.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </div>
+    );
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'overview':
@@ -1447,6 +1966,8 @@ const Dashboard = () => {
         return renderAcademicData();
       case 'courses':
         return renderCourseManagement();
+      case 'view-student':
+        return renderViewStudentRecords();
       default:
         return renderOverview();
     }

@@ -23,7 +23,8 @@ const LandingPage = () => {
     password: '',
     nama: '',
     type: 'mahasiswa',
-    prodi: 'teknik_informatika'
+    prodi: 'teknik_informatika',
+    nim_nip_dosen_wali: ''
   });
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
@@ -56,10 +57,27 @@ const LandingPage = () => {
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value
-    }));
+    
+    // If user type changes from mahasiswa to something else, clear dosen_wali field
+    if (name === 'type' && value !== 'mahasiswa') {
+      setFormData(prev => ({
+        ...prev,
+        [name]: value,
+        nim_nip_dosen_wali: ''
+      }));
+      // Clear dosen_wali error if it exists
+      if (errors.nim_nip_dosen_wali) {
+        setErrors(prev => ({
+          ...prev,
+          nim_nip_dosen_wali: ''
+        }));
+      }
+    } else {
+      setFormData(prev => ({
+        ...prev,
+        [name]: value
+      }));
+    }
     
     // Clear error when user starts typing
     if (errors[name]) {
@@ -74,9 +92,19 @@ const LandingPage = () => {
     const newErrors = {};
     
     if (!formData.nim_nip.trim()) {
-      newErrors.nim_nip = 'NIM/NIP is required';
-    } else if (!validationUtils.validateNimNip(formData.nim_nip)) {
-      newErrors.nim_nip = 'NIM/NIP must be 8-18 numeric characters';
+      newErrors.nim_nip = `${getNimNipLabel()} is required`;
+    } else if (
+      (isLoginMode && !/^\d{8}$|^\d{18}$/.test(formData.nim_nip)) ||
+      (!isLoginMode && (
+        (formData.type === 'mahasiswa' && !/^\d{8}$/.test(formData.nim_nip)) ||
+        ((formData.type === 'dosen_wali' || formData.type === 'kaprodi') && !/^\d{18}$/.test(formData.nim_nip))
+      ))
+    ) {
+      newErrors.nim_nip = isLoginMode
+        ? 'NIM/NIP must be 8 or 18 digits'
+        : (formData.type === 'mahasiswa'
+            ? 'NIM must be exactly 8 digits'
+            : 'NIP must be exactly 18 digits');
     }
 
     if (!formData.password.trim()) {
@@ -88,6 +116,14 @@ const LandingPage = () => {
     if (!isLoginMode) {
       if (!formData.nama.trim()) {
         newErrors.nama = 'Full name is required';
+      }
+      
+      if (formData.type === 'mahasiswa') {
+        if (!formData.nim_nip_dosen_wali.trim()) {
+          newErrors.nim_nip_dosen_wali = 'Dosen Wali NIP is required for mahasiswa registration';
+        } else if (!/^\d{18}$/.test(formData.nim_nip_dosen_wali)) {
+          newErrors.nim_nip_dosen_wali = 'Dosen Wali NIP must be exactly 18 digits';
+        }
       }
     }
     
@@ -117,7 +153,8 @@ const LandingPage = () => {
           password: formData.password,
           nama: formData.nama,
           type: formData.type,
-          prodi: formData.prodi
+          prodi: formData.prodi,
+          nim_nip_dosen_wali: formData.nim_nip_dosen_wali
         });
       }
       
@@ -142,6 +179,23 @@ const LandingPage = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Add a helper to get the correct label and placeholder for NIM/NIP
+  const getNimNipLabel = () => {
+    if (isLoginMode) return 'NIM/NIP';
+    if (formData.type === 'mahasiswa') return 'NIM';
+    return 'NIP';
+  };
+  const getNimNipPlaceholder = () => {
+    if (isLoginMode) return 'Enter your NIM (8 digits) or NIP (18 digits)';
+    if (formData.type === 'mahasiswa') return 'Enter your NIM (8 digits)';
+    return 'Enter your NIP (18 digits)';
+  };
+  const getNimNipPattern = () => {
+    if (isLoginMode) return '\\d{8}|\\d{18}';
+    if (formData.type === 'mahasiswa') return '\\d{8}';
+    return '\\d{18}';
   };
 
   return (
@@ -280,17 +334,17 @@ const LandingPage = () => {
               {/* NIM/NIP Field */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  NIM/NIP
+                  {getNimNipLabel()}
                 </label>
                 <input
                   type="text"
                   name="nim_nip"
                   value={formData.nim_nip}
                   onChange={handleInputChange}
-                  pattern="[0-9]*"
+                  pattern={getNimNipPattern()}
                   inputMode="numeric"
                   className={`input-field ${errors.nim_nip ? 'border-red-500' : ''}`}
-                  placeholder="Enter your NIM or NIP (8-18 numbers only)"
+                  placeholder={getNimNipPlaceholder()}
                   disabled={isLoading}
                 />
                 {errors.nim_nip && (
@@ -395,6 +449,36 @@ const LandingPage = () => {
                 </div>
               )}
 
+              {/* Dosen Wali NIP Field (Registration only, mahasiswa only) */}
+              {!isLoginMode && formData.type === 'mahasiswa' && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                >
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Dosen Wali NIP <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="nim_nip_dosen_wali"
+                    value={formData.nim_nip_dosen_wali}
+                    onChange={handleInputChange}
+                    pattern="\d{18}"
+                    inputMode="numeric"
+                    className={`input-field ${errors.nim_nip_dosen_wali ? 'border-red-500' : ''}`}
+                    placeholder="Enter your academic advisor's NIP (18 digits)"
+                    disabled={isLoading}
+                  />
+                  {errors.nim_nip_dosen_wali && (
+                    <p className="text-red-500 text-xs mt-1">{errors.nim_nip_dosen_wali}</p>
+                  )}
+                  <p className="text-xs text-gray-500 mt-1">
+                    Enter the NIP of your assigned academic advisor (dosen wali)
+                  </p>
+                </motion.div>
+              )}
+
               {/* Submit Button */}
               <motion.button
                 type="submit"
@@ -427,7 +511,7 @@ const LandingPage = () => {
                   setIsLoginMode(!isLoginMode);
                   setErrors({});
                   setMessage({ type: '', text: '' });
-                  setFormData(prev => ({ ...prev, nama: '', password: '' }));
+                  setFormData(prev => ({ ...prev, nama: '', password: '', nim_nip_dosen_wali: '' }));
                 }}
                 className="text-primary-600 hover:text-primary-700 text-sm font-medium"
                 disabled={isLoading}
@@ -443,9 +527,16 @@ const LandingPage = () => {
             <div className="mt-6 p-3 bg-blue-50 rounded-lg border border-blue-200">
               <div className="flex items-start space-x-2">
                 <Shield className="h-4 w-4 text-blue-600 mt-0.5" />
-                <p className="text-xs text-blue-700">
-                  Your password is used as a seed to generate a unique RSA key pair. This ensures maximum security and your keys are deterministically recreated from your password.
-                </p>
+                <div className="text-xs text-blue-700">
+                  <p className="mb-2">
+                    Your password is used as a seed to generate a unique RSA key pair. This ensures maximum security and your keys are deterministically recreated from your password.
+                  </p>
+                  {!isLoginMode && formData.type === 'mahasiswa' && (
+                    <p>
+                      <strong>Note for Students:</strong> You must provide your assigned academic advisor's (Dosen Wali) NIP during registration. This ensures proper access control for your academic records.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           </motion.div>
