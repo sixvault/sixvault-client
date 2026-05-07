@@ -1,3 +1,20 @@
+<div align="center">
+  <table border="1">
+    <tr>
+      <td align="center" style="padding: 20px;">
+        <h3>📢 Domain & Email Migration Notice</h3>
+        <p>From <b>June 7th, 2026</b>, Sixvault will transition to new domains as <code>sixvault.xyz</code> will not be renewed:</p>
+        <p>🌐 <b>Website:</b> <a href="https://sixvault.faizath.com">sixvault.faizath.com</a> (formerly <i>sixvault.xyz</i>)<br>
+        ⚙️ <b>API:</b> <a href="https://sixvault-api.faizath.com">sixvault-api.faizath.com</a> (formerly <i>api.sixvault.xyz</i>)<br>
+        📧 <b>Email:</b> <a href="mailto:contact@sixvault.faizath.com">contact@sixvault.faizath.com</a> (formerly <i>contact@sixvault.xyz</i>)<br>
+        🛰️ <b>CDN:</b> <a>sixvault-cdn.faizath.com</a> (formerly <i>cdn.sixvault.xyz</i>)<br>
+        📈 <b>Status Pages:</b> <a href="https://status.faizath.com/status/sixvault">https://status.faizath.com/status/sixvault</a> (formerly <i>status.sixvault.xyz</i>)
+        </p>
+      </td>
+    </tr>
+  </table>
+</div>
+
 # Sixvault - Secure Academic Transcript Management System
 
 Sixvault is a secure, role-based academic transcript management system that integrates multi-cryptographic techniques—including AES encryption, RSA digital signatures, and Shamir's Secret Sharing—to protect the confidentiality, integrity, and authenticity of student data in a controlled, collaborative environment.
@@ -53,7 +70,7 @@ Sixvault is a secure, role-based academic transcript management system that inte
 ## Project Structure
 
 ```
-sixvault-client/
+sixvault-web/
 ├── src/
 │   ├── components/
 │   │   ├── LandingPage.jsx      # Main landing page with login/register
@@ -86,8 +103,8 @@ sixvault-client/
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd sixvault-client
+git clone https://github.com/sixvault/sixvault-web.git
+cd sixvault-web
 ```
 
 2. Install dependencies:
